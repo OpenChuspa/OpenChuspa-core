@@ -1,0 +1,225 @@
+package s3api
+
+import "encoding/xml"
+
+const (
+	xmlns      = "http://s3.amazonaws.com/doc/2006-03-01/"
+	timeFormat = "2006-01-02T15:04:05.000Z"
+	ownerID    = "openchuspa"
+
+	// nullVersion es el identificador de versión de un objeto sin versionar.
+	nullVersion = "null"
+)
+
+type owner struct {
+	ID          string
+	DisplayName string
+}
+
+type listBucketsResult struct {
+	XMLName xml.Name      `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListAllMyBucketsResult"`
+	Owner   owner         `xml:"Owner"`
+	Buckets []bucketEntry `xml:"Buckets>Bucket"`
+	// ContinuationToken solo aparece si quedaron chuspas por listar.
+	ContinuationToken string `xml:",omitempty"`
+	Prefix            string `xml:",omitempty"`
+}
+
+type bucketEntry struct {
+	Name         string
+	CreationDate string
+	BucketRegion string
+}
+
+type locationConstraint struct {
+	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ LocationConstraint"`
+	Region  string   `xml:",chardata"`
+}
+
+type listObjectsV2Result struct {
+	XMLName               xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
+	Name                  string
+	Prefix                string
+	Delimiter             string `xml:",omitempty"`
+	StartAfter            string `xml:",omitempty"`
+	MaxKeys               int
+	EncodingType          string `xml:",omitempty"`
+	KeyCount              int
+	IsTruncated           bool
+	ContinuationToken     string         `xml:",omitempty"`
+	NextContinuationToken string         `xml:",omitempty"`
+	Contents              []objectEntry  `xml:"Contents"`
+	CommonPrefixes        []commonPrefix `xml:"CommonPrefixes"`
+}
+
+type objectEntry struct {
+	Key          string
+	LastModified string
+	ETag         string
+	Size         int64
+	Owner        *owner `xml:",omitempty"`
+	StorageClass string
+}
+
+type commonPrefix struct {
+	Prefix string
+}
+
+type initiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ InitiateMultipartUploadResult"`
+	Bucket   string
+	Key      string
+	UploadID string `xml:"UploadId"`
+}
+
+type completeMultipartUpload struct {
+	XMLName xml.Name `xml:"CompleteMultipartUpload"`
+	Parts   []struct {
+		PartNumber int
+		ETag       string
+	} `xml:"Part"`
+}
+
+type completeMultipartUploadResult struct {
+	XMLName           xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CompleteMultipartUploadResult"`
+	Location          string
+	Bucket            string
+	Key               string
+	ETag              string
+	ChecksumCRC32     string `xml:",omitempty"`
+	ChecksumCRC32C    string `xml:",omitempty"`
+	ChecksumCRC64NVME string `xml:",omitempty"`
+	ChecksumSHA1      string `xml:",omitempty"`
+	ChecksumSHA256    string `xml:",omitempty"`
+	ChecksumType      string `xml:",omitempty"`
+}
+
+type listPartsResult struct {
+	XMLName              xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListPartsResult"`
+	Bucket               string
+	Key                  string
+	UploadID             string `xml:"UploadId"`
+	PartNumberMarker     int
+	NextPartNumberMarker int
+	MaxParts             int
+	IsTruncated          bool
+	Parts                []partEntry `xml:"Part"`
+}
+
+type partEntry struct {
+	PartNumber   int
+	LastModified string
+	ETag         string
+	Size         int64
+}
+
+type copyObjectResult struct {
+	XMLName      xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyObjectResult"`
+	LastModified string
+	ETag         string
+}
+
+type deleteRequest struct {
+	XMLName xml.Name `xml:"Delete"`
+	Quiet   bool
+	Objects []struct {
+		Key       string
+		VersionID string `xml:"VersionId"`
+		// Condiciones opcionales del borrado.
+		ETag             string
+		LastModifiedTime string
+		Size             string
+	} `xml:"Object"`
+}
+
+type deleteResult struct {
+	XMLName xml.Name       `xml:"http://s3.amazonaws.com/doc/2006-03-01/ DeleteResult"`
+	Deleted []deletedEntry `xml:"Deleted"`
+	Errors  []deleteError  `xml:"Error"`
+}
+
+type deletedEntry struct {
+	Key string
+}
+
+type deleteError struct {
+	Key     string
+	Code    string
+	Message string
+}
+
+type listObjectsV1Result struct {
+	XMLName        xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
+	Name           string
+	Prefix         string
+	Marker         string
+	NextMarker     string `xml:",omitempty"`
+	Delimiter      string `xml:",omitempty"`
+	MaxKeys        int
+	EncodingType   string `xml:",omitempty"`
+	IsTruncated    bool
+	Contents       []objectEntry  `xml:"Contents"`
+	CommonPrefixes []commonPrefix `xml:"CommonPrefixes"`
+}
+
+type listUploadsResult struct {
+	XMLName            xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListMultipartUploadsResult"`
+	Bucket             string
+	KeyMarker          string
+	UploadIDMarker     string `xml:"UploadIdMarker"`
+	NextKeyMarker      string `xml:",omitempty"`
+	NextUploadIDMarker string `xml:"NextUploadIdMarker,omitempty"`
+	Prefix             string
+	MaxUploads         int
+	EncodingType       string `xml:",omitempty"`
+	IsTruncated        bool
+	Uploads            []uploadEntry `xml:"Upload"`
+}
+
+type uploadEntry struct {
+	Key          string
+	UploadID     string `xml:"UploadId"`
+	Initiator    owner
+	Owner        owner
+	StorageClass string
+	Initiated    string
+}
+
+type copyPartResult struct {
+	XMLName      xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyPartResult"`
+	LastModified string
+	ETag         string
+}
+
+// tagging siempre va vacío: los tags llegan en la fase 2.
+type tagging struct {
+	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ Tagging"`
+	TagSet  struct{} `xml:"TagSet"`
+}
+
+type listVersionsResult struct {
+	XMLName             xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListVersionsResult"`
+	Name                string
+	Prefix              string
+	KeyMarker           string
+	VersionIDMarker     string `xml:"VersionIdMarker"`
+	NextKeyMarker       string `xml:",omitempty"`
+	NextVersionIDMarker string `xml:"NextVersionIdMarker,omitempty"`
+	Delimiter           string `xml:",omitempty"`
+	MaxKeys             int
+	EncodingType        string `xml:",omitempty"`
+	IsTruncated         bool
+	Versions            []versionEntry `xml:"Version"`
+	CommonPrefixes      []commonPrefix `xml:"CommonPrefixes"`
+}
+
+type versionEntry struct {
+	Key          string
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool
+	LastModified string
+	ETag         string
+	Size         int64
+	Owner        owner
+	StorageClass string
+}
