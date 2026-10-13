@@ -30,6 +30,7 @@ func TestLoad(t *testing.T) {
 		{"anónimo expuesto", map[string]string{"CHUSPA_ADDR": ":9000", "CHUSPA_ALLOW_ANONYMOUS": "true"}, "solo se permite escuchando en loopback"},
 		{"usuario con barra", map[string]string{"CHUSPA_ROOT_USER": "a/b", "CHUSPA_ROOT_PASSWORD": goodSecret}, "CHUSPA_ROOT_USER inválido"},
 		{"dirección inválida", map[string]string{"CHUSPA_ADDR": "9000"}, "CHUSPA_ADDR inválida"},
+		{"expiración inválida", map[string]string{"CHUSPA_MULTIPART_EXPIRY": "una semana"}, "CHUSPA_MULTIPART_EXPIRY inválida"},
 		{"dos fuentes del secreto", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_FILE": "/x"}, "no ambas"},
 	}
 	for _, tt := range tests {

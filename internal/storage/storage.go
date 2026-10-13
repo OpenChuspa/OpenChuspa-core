@@ -141,6 +141,9 @@ type Backend interface {
 	GetUpload(ctx context.Context, bucket, key, uploadID string) (Upload, error)
 	PutPart(ctx context.Context, bucket, key, uploadID string, number int, s Staged, in PutInput) (Part, error)
 	ListParts(ctx context.Context, bucket, key, uploadID string) ([]Part, error)
+	// ListUploads devuelve las subidas en curso de la chuspa, ordenadas por
+	// key y luego por identificador.
+	ListUploads(ctx context.Context, bucket string) ([]Upload, error)
 	// CompleteUpload une las partes declaradas y publica el objeto. Si
 	// checksum no es vacío, debe coincidir con el del objeto resultante.
 	CompleteUpload(ctx context.Context, bucket, key, uploadID string, parts []CompletedPart, checksum string) (Object, error)

@@ -40,7 +40,7 @@ para que el tiempo de respuesta no revele el motivo.
 - `aws-sdk-go-v2` pasa a ser una dependencia solo de pruebas.
 - La canonicalización es código propio (unas 100 líneas) y por eso lleva
   pruebas contra el firmador oficial, fuzzing del header `Authorization` y la
-  suite con clientes reales (`test/compat/awscli.sh`).
+  suite con clientes reales (`test/compat/run.sh`).
 - El enrutado tampoco usa `http.ServeMux`, como sugería la sección 3.1: el mux
   limpia la ruta (`..`, `//`) y redirige, lo que rompe keys que S3 considera
   válidas. El enrutador es un `switch` por método y query en `internal/s3api`.

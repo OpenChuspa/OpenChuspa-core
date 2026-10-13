@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -67,23 +68,59 @@ func (s *Server) deleteBucket(r *request) *APIError {
 	return nil
 }
 
-func (s *Server) listObjectsV2(r *request) *APIError {
-	q := r.URL.Query()
-	in := storage.ListInput{Prefix: q.Get("prefix"), Delimiter: q.Get("delimiter"), MaxKeys: maxListKeys}
-	if v := q.Get("max-keys"); v != "" {
+// listParams son los parámetros comunes a las dos versiones del listado.
+type listParams struct {
+	in       storage.ListInput
+	encoding string
+	encode   func(string) string
+}
+
+func parseListParams(q url.Values, maxParam string) (listParams, *APIError) {
+	p := listParams{
+		in:     storage.ListInput{Prefix: q.Get("prefix"), Delimiter: q.Get("delimiter"), MaxKeys: maxListKeys},
+		encode: func(s string) string { return s },
+	}
+	if v := q.Get(maxParam); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			return invalidArgument("max-keys debe ser un entero no negativo.")
+			return p, invalidArgument(maxParam + " debe ser un entero no negativo.")
 		}
-		in.MaxKeys = min(n, maxListKeys)
+		p.in.MaxKeys = min(n, maxListKeys)
 	}
-	encode := func(s string) string { return s }
-	switch q.Get("encoding-type") {
+	switch p.encoding = q.Get("encoding-type"); p.encoding {
 	case "":
 	case "url":
-		encode = urlEncodeKey
+		p.encode = urlEncodeKey
 	default:
-		return invalidArgument("encoding-type solo admite el valor url.")
+		return p, invalidArgument("encoding-type solo admite el valor url.")
+	}
+	return p, nil
+}
+
+func objectEntries(objects []storage.Object, encode func(string) string) []objectEntry {
+	out := make([]objectEntry, 0, len(objects))
+	for _, o := range objects {
+		out = append(out, objectEntry{
+			Key: encode(o.Key), LastModified: o.Modified.Format(timeFormat),
+			ETag: quote(o.ETag), Size: o.Size, StorageClass: "STANDARD",
+		})
+	}
+	return out
+}
+
+func prefixEntries(prefixes []string, encode func(string) string) []commonPrefix {
+	out := make([]commonPrefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		out = append(out, commonPrefix{Prefix: encode(p)})
+	}
+	return out
+}
+
+func (s *Server) listObjectsV2(r *request) *APIError {
+	q := r.URL.Query()
+	p, apiErr := parseListParams(q, "max-keys")
+	if apiErr != nil {
+		return apiErr
 	}
 	token := q.Get("continuation-token")
 	if token != "" {
@@ -91,32 +128,99 @@ func (s *Server) listObjectsV2(r *request) *APIError {
 		if !ok {
 			return invalidArgument("continuation-token inválido.")
 		}
-		in.After, in.AfterPrefix = after, isPrefix
+		p.in.After, p.in.AfterPrefix = after, isPrefix
 	} else {
-		in.After = q.Get("start-after")
+		p.in.After = q.Get("start-after")
 	}
 
-	res, err := s.Backend.ListObjects(r.Context(), r.bucket, in)
+	res, err := s.Backend.ListObjects(r.Context(), r.bucket, p.in)
 	if err != nil {
 		return storageError(err)
 	}
 	out := listObjectsV2Result{
-		Name: r.bucket, Prefix: encode(in.Prefix), Delimiter: encode(in.Delimiter),
-		StartAfter: encode(q.Get("start-after")), MaxKeys: in.MaxKeys, EncodingType: q.Get("encoding-type"),
+		Name: r.bucket, Prefix: p.encode(p.in.Prefix), Delimiter: p.encode(p.in.Delimiter),
+		StartAfter: p.encode(q.Get("start-after")), MaxKeys: p.in.MaxKeys, EncodingType: p.encoding,
 		KeyCount: len(res.Objects) + len(res.CommonPrefixes), IsTruncated: res.Truncated,
 		ContinuationToken: token,
+		Contents:          objectEntries(res.Objects, p.encode),
+		CommonPrefixes:    prefixEntries(res.CommonPrefixes, p.encode),
 	}
 	if res.Truncated {
 		out.NextContinuationToken = encodeToken(res.Next, res.NextIsPrefix)
 	}
-	for _, o := range res.Objects {
-		out.Contents = append(out.Contents, objectEntry{
-			Key: encode(o.Key), LastModified: o.Modified.Format(timeFormat),
-			ETag: quote(o.ETag), Size: o.Size, StorageClass: "STANDARD",
-		})
+	writeXML(r.w, http.StatusOK, out)
+	return nil
+}
+
+// listObjectsV1 es el listado original, que pagina con marker.
+func (s *Server) listObjectsV1(r *request) *APIError {
+	q := r.URL.Query()
+	p, apiErr := parseListParams(q, "max-keys")
+	if apiErr != nil {
+		return apiErr
 	}
-	for _, p := range res.CommonPrefixes {
-		out.CommonPrefixes = append(out.CommonPrefixes, commonPrefix{Prefix: encode(p)})
+	marker := q.Get("marker")
+	p.in.After = marker
+	// Un marker que es un prefijo común (el NextMarker de la página anterior)
+	// salta todo lo que cuelga de él.
+	p.in.AfterPrefix = p.in.Delimiter != "" && strings.HasSuffix(marker, p.in.Delimiter) && strings.HasPrefix(marker, p.in.Prefix)
+
+	res, err := s.Backend.ListObjects(r.Context(), r.bucket, p.in)
+	if err != nil {
+		return storageError(err)
+	}
+	out := listObjectsV1Result{
+		Name: r.bucket, Prefix: p.encode(p.in.Prefix), Marker: p.encode(marker), Delimiter: p.encode(p.in.Delimiter),
+		MaxKeys: p.in.MaxKeys, EncodingType: p.encoding, IsTruncated: res.Truncated,
+		Contents:       objectEntries(res.Objects, p.encode),
+		CommonPrefixes: prefixEntries(res.CommonPrefixes, p.encode),
+	}
+	if res.Truncated {
+		out.NextMarker = p.encode(res.Next)
+	}
+	writeXML(r.w, http.StatusOK, out)
+	return nil
+}
+
+func (s *Server) listUploads(r *request) *APIError {
+	q := r.URL.Query()
+	if q.Get("delimiter") != "" {
+		return ErrNotImplemented
+	}
+	p, apiErr := parseListParams(q, "max-uploads")
+	if apiErr != nil {
+		return apiErr
+	}
+	keyMarker, idMarker := q.Get("key-marker"), q.Get("upload-id-marker")
+	uploads, err := s.Backend.ListUploads(r.Context(), r.bucket)
+	if err != nil {
+		return storageError(err)
+	}
+	out := listUploadsResult{
+		Bucket: r.bucket, KeyMarker: p.encode(keyMarker), UploadIDMarker: idMarker,
+		Prefix: p.encode(p.in.Prefix), MaxUploads: p.in.MaxKeys, EncodingType: p.encoding,
+	}
+	me := owner{ID: ownerID, DisplayName: ownerID}
+	for _, u := range uploads {
+		if !strings.HasPrefix(u.Key, p.in.Prefix) {
+			continue
+		}
+		// Después del marcador: keys mayores o, con la misma key, ids mayores.
+		if keyMarker != "" && (u.Key < keyMarker || (u.Key == keyMarker && (idMarker == "" || u.ID <= idMarker))) {
+			continue
+		}
+		if len(out.Uploads) == p.in.MaxKeys {
+			out.IsTruncated = true
+			break
+		}
+		out.Uploads = append(out.Uploads, uploadEntry{
+			Key: p.encode(u.Key), UploadID: u.ID, Initiator: me, Owner: me,
+			StorageClass: "STANDARD", Initiated: u.Initiated.Format(timeFormat),
+		})
+		out.NextKeyMarker, out.NextUploadIDMarker = p.encode(u.Key), u.ID
+	}
+	if !out.IsTruncated {
+		out.NextKeyMarker, out.NextUploadIDMarker = "", ""
 	}
 	writeXML(r.w, http.StatusOK, out)
 	return nil

@@ -1,10 +1,13 @@
 package s3api
 
 import (
+	"encoding/xml"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenChuspa/OpenChuspa-core/internal/checksum"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/storage"
@@ -52,7 +55,40 @@ func metadataFromHeaders(h http.Header) (storage.Metadata, *APIError) {
 	return m, nil
 }
 
+// unsupportedWriteHeaders rechaza los headers que piden algo que el motor no
+// hace. Ignorarlos sería un éxito falso: el cliente creería que su objeto
+// quedó cifrado, público, con tags o bloqueado.
+func unsupportedWriteHeaders(h http.Header) *APIError {
+	if acl := h.Get("X-Amz-Acl"); acl != "" && acl != "private" {
+		return ErrNotImplemented
+	}
+	if class := h.Get("X-Amz-Storage-Class"); class != "" && class != "STANDARD" {
+		return ErrNotImplemented
+	}
+	for name := range h {
+		switch {
+		case name == "X-Amz-Tagging", name == "X-Amz-Website-Redirect-Location",
+			strings.HasPrefix(name, "X-Amz-Server-Side-Encryption"),
+			strings.HasPrefix(name, "X-Amz-Object-Lock-"),
+			strings.HasPrefix(name, "X-Amz-Grant-"):
+			return ErrNotImplemented
+		}
+	}
+	return nil
+}
+
+func (s *Server) getObjectTagging(r *request) *APIError {
+	if _, err := s.Backend.HeadObject(r.Context(), r.bucket, r.key); err != nil {
+		return storageError(err)
+	}
+	writeXML(r.w, http.StatusOK, tagging{})
+	return nil
+}
+
 func (s *Server) putObject(r *request) *APIError {
+	if apiErr := unsupportedWriteHeaders(r.Header); apiErr != nil {
+		return apiErr
+	}
 	if _, err := s.Backend.GetBucket(r.Context(), r.bucket); err != nil {
 		return storageError(err)
 	}
@@ -163,9 +199,168 @@ func (s *Server) getObject(r *request, withBody bool) *APIError {
 	}
 	r.w.WriteHeader(status)
 	// Con los headers ya enviados, un fallo aquí solo puede cortar la conexión.
-	if _, err := io.CopyN(r.w, content, length); err != nil {
+	if err := s.send(r.w, io.LimitReader(content, length)); err != nil {
 		panic(http.ErrAbortHandler)
 	}
+	return nil
+}
+
+// send copia src a la respuesta renovando el plazo de escritura en cada
+// bloque, para soltar las descargas de clientes que dejan de leer.
+func (s *Server) send(w http.ResponseWriter, src io.Reader) error {
+	rc := http.NewResponseController(w)
+	defer rc.SetWriteDeadline(time.Time{})
+	buf := make([]byte, 256<<10)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			rc.SetWriteDeadline(time.Now().Add(s.idleTimeout()))
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return werr
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// copySource interpreta x-amz-copy-source ("chuspa/key", codificado como URL).
+func copySource(r *http.Request) (bucket, key string, apiErr *APIError) {
+	raw := r.Header.Get("X-Amz-Copy-Source")
+	if strings.Contains(raw, "?") {
+		return "", "", ErrNotImplemented // copiar una versión concreta
+	}
+	source, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", "", invalidArgument("x-amz-copy-source inválido.")
+	}
+	bucket, key, _ = strings.Cut(strings.TrimPrefix(source, "/"), "/")
+	if !validBucketName(bucket) || key == "" || validateKey(key) != nil {
+		return "", "", invalidArgument("x-amz-copy-source debe tener la forma chuspa/key.")
+	}
+	for _, h := range []string{"X-Amz-Copy-Source-If-Modified-Since", "X-Amz-Copy-Source-If-Unmodified-Since"} {
+		if r.Header.Get(h) != "" {
+			return "", "", ErrNotImplemented
+		}
+	}
+	return bucket, key, nil
+}
+
+func copyPreconditions(r *http.Request, etag string) *APIError {
+	if v := r.Header.Get("X-Amz-Copy-Source-If-Match"); v != "" && !etagMatches(v, etag) {
+		return ErrPreconditionFailed
+	}
+	if v := r.Header.Get("X-Amz-Copy-Source-If-None-Match"); v != "" && etagMatches(v, etag) {
+		return ErrPreconditionFailed
+	}
+	return nil
+}
+
+func (s *Server) copyObject(r *request) *APIError {
+	drain(r.Request)
+	if apiErr := unsupportedWriteHeaders(r.Header); apiErr != nil {
+		return apiErr
+	}
+	// COPY (por defecto) conserva los tags del origen, que nunca existen.
+	if d := r.Header.Get("X-Amz-Tagging-Directive"); d != "" && !strings.EqualFold(d, "COPY") {
+		return ErrNotImplemented
+	}
+	srcBucket, srcKey, apiErr := copySource(r.Request)
+	if apiErr != nil {
+		return apiErr
+	}
+	if r.Header.Get("X-Amz-Copy-Source-Range") != "" {
+		return invalidArgument("x-amz-copy-source-range solo aplica al copiar una parte.")
+	}
+	replace := false
+	switch strings.ToUpper(r.Header.Get("X-Amz-Metadata-Directive")) {
+	case "", "COPY":
+	case "REPLACE":
+		replace = true
+	default:
+		return invalidArgument("x-amz-metadata-directive debe ser COPY o REPLACE.")
+	}
+	if srcBucket == r.bucket && srcKey == r.key && !replace {
+		return invalidRequest("Copiar un objeto sobre sí mismo exige cambiar sus metadatos (x-amz-metadata-directive: REPLACE).")
+	}
+	if _, err := s.Backend.GetBucket(r.Context(), r.bucket); err != nil {
+		return storageError(err)
+	}
+
+	obj, content, err := s.Backend.GetObject(r.Context(), srcBucket, srcKey)
+	if err != nil {
+		return storageError(err)
+	}
+	defer content.Close()
+	if apiErr := copyPreconditions(r.Request, obj.ETag); apiErr != nil {
+		return apiErr
+	}
+	meta := obj.Metadata
+	if replace {
+		var apiErr *APIError
+		if meta, apiErr = metadataFromHeaders(r.Header); apiErr != nil {
+			return apiErr
+		}
+	}
+
+	staged, err := s.Backend.Stage(r.Context(), content)
+	if err != nil {
+		return storageError(err)
+	}
+	// El contenido es idéntico: el ETag y el checksum del origen siguen valiendo.
+	copied, err := s.Backend.PutObject(r.Context(), r.bucket, r.key, staged, storage.PutInput{
+		ETag: obj.ETag, ChecksumAlgo: obj.ChecksumAlgo, Checksum: obj.Checksum, Metadata: meta,
+	})
+	if err != nil {
+		return storageError(err)
+	}
+	writeXML(r.w, http.StatusOK, copyObjectResult{LastModified: copied.Modified.Format(timeFormat), ETag: quote(copied.ETag)})
+	return nil
+}
+
+func (s *Server) deleteObjects(r *request) *APIError {
+	if _, err := s.Backend.GetBucket(r.Context(), r.bucket); err != nil {
+		return storageError(err)
+	}
+	// Igual que S3: este cuerpo siempre viaja con una suma de integridad.
+	if algo, _, _ := declaredChecksum(r.Request); algo == "" && r.Header.Get("Content-MD5") == "" {
+		return invalidRequest("Falta Content-MD5 o un header x-amz-checksum-*.")
+	}
+	data, apiErr := s.readXML(r)
+	if apiErr != nil {
+		return apiErr
+	}
+	var in deleteRequest
+	if err := xml.Unmarshal(data, &in); err != nil || len(in.Objects) == 0 || len(in.Objects) > maxListKeys {
+		return ErrMalformedXML
+	}
+	var out deleteResult
+	for _, o := range in.Objects {
+		apiErr := validateKey(o.Key)
+		if apiErr == nil && o.VersionID != "" {
+			apiErr = ErrNotImplemented
+		}
+		if apiErr == nil {
+			if err := s.Backend.DeleteObject(r.Context(), r.bucket, o.Key); err != nil {
+				apiErr = storageError(err)
+			}
+		}
+		switch {
+		case apiErr != nil:
+			if apiErr.Status >= 500 && apiErr != ErrNotImplemented {
+				s.Log.Error("error interno", "request_id", r.w.Header().Get("x-amz-request-id"), "error", apiErr.Message)
+				apiErr = ErrInternal
+			}
+			out.Errors = append(out.Errors, deleteError{Key: o.Key, Code: apiErr.Code, Message: apiErr.Message})
+		case !in.Quiet:
+			out.Deleted = append(out.Deleted, deletedEntry{Key: o.Key})
+		}
+	}
+	writeXML(r.w, http.StatusOK, out)
 	return nil
 }
 

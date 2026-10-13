@@ -6,10 +6,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,15 +153,35 @@ func TestNeverFakeSuccess(t *testing.T) {
 	call(t, "PUT", srv.URL+"/chuspa", "")
 	call(t, "PUT", srv.URL+"/chuspa/k", "x")
 	cases := []struct{ method, target string }{
-		{"GET", "/chuspa?versioning"}, {"PUT", "/chuspa?acl"}, {"GET", "/chuspa"}, {"GET", "/chuspa?uploads"},
-		{"POST", "/chuspa?delete"}, {"PUT", "/chuspa/k?tagging"}, {"GET", "/chuspa/k?versionId=1"},
+		{"GET", "/chuspa?versioning"}, {"PUT", "/chuspa?acl"}, {"GET", "/chuspa?versions"}, {"GET", "/chuspa?uploads&delimiter=/"},
+		{"POST", "/chuspa"}, {"PUT", "/chuspa/k?tagging"}, {"GET", "/chuspa/k?versionId=1"},
 	}
 	for _, tc := range cases {
 		status, body, _ := call(t, tc.method, srv.URL+tc.target, "")
 		wantStatus(t, tc.method+" "+tc.target, status, body, 501, "NotImplemented")
 	}
-	status, body, _ := call(t, "PUT", srv.URL+"/chuspa/copia", "", "X-Amz-Copy-Source", "/chuspa/k")
-	wantStatus(t, "CopyObject", status, body, 501, "NotImplemented")
+	status, body, _ := call(t, "PUT", srv.URL+"/chuspa/copia", "", "X-Amz-Copy-Source", "/chuspa/k?versionId=1")
+	wantStatus(t, "copia de una versión", status, body, 501, "NotImplemented")
+	// Headers que piden algo que el motor no hace: nunca se ignoran en silencio.
+	for _, h := range [][2]string{
+		{"X-Amz-Acl", "public-read"}, {"X-Amz-Server-Side-Encryption", "AES256"}, {"X-Amz-Tagging", "a=b"},
+		{"X-Amz-Storage-Class", "GLACIER"}, {"X-Amz-Object-Lock-Mode", "GOVERNANCE"},
+	} {
+		status, body, _ := call(t, "PUT", srv.URL+"/chuspa/con-header", "x", h[0], h[1])
+		wantStatus(t, h[0], status, body, 501, "NotImplemented")
+	}
+	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/con-header", ""); status != 404 {
+		t.Fatalf("se guardó un objeto con un header no soportado: HTTP %d", status)
+	}
+	if status, body, _ := call(t, "PUT", srv.URL+"/chuspa/privado", "x", "X-Amz-Acl", "private"); status != 200 {
+		t.Fatalf("acl private: HTTP %d %s", status, body)
+	}
+	status, body, _ = call(t, "GET", srv.URL+"/chuspa/k?tagging", "")
+	if status != 200 || !strings.Contains(body, "<TagSet></TagSet>") {
+		t.Fatalf("GetObjectTagging: HTTP %d %s", status, body)
+	}
+	status, body, _ = call(t, "GET", srv.URL+"/chuspa/no-existe?tagging", "")
+	wantStatus(t, "tags de un objeto inexistente", status, body, 404, "NoSuchKey")
 	status, body, _ = call(t, "PUT", srv.URL+"/chuspa/k", "", "X-Amz-Content-Sha256", "STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD")
 	wantStatus(t, "modo de cuerpo desconocido", status, body, 400, "InvalidRequest")
 	status, body, _ = call(t, "PUT", srv.URL+"/chuspa/"+strings.Repeat("k", 1025), "x")
@@ -332,4 +354,192 @@ func hmacSHA256(key []byte, data string) []byte {
 	m := hmac.New(sha256.New, key)
 	m.Write([]byte(data))
 	return m.Sum(nil)
+}
+
+func TestCopyObject(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/origen", "")
+	call(t, "PUT", srv.URL+"/destino", "")
+	_, _, h := call(t, "PUT", srv.URL+"/origen/con espacio.txt", "contenido", "Content-Type", "text/plain", "X-Amz-Meta-Barrio", "Granada")
+	etag := h.Get("ETag")
+
+	status, body, _ := call(t, "PUT", srv.URL+"/destino/copia.txt", "", "X-Amz-Copy-Source", "/origen/con%20espacio.txt")
+	if status != 200 || !strings.Contains(body, "<CopyObjectResult") || !strings.Contains(body, strings.Trim(etag, `"`)) {
+		t.Fatalf("copia: HTTP %d %s", status, body)
+	}
+	status, body, h = call(t, "GET", srv.URL+"/destino/copia.txt", "")
+	if status != 200 || body != "contenido" || h.Get("Content-Type") != "text/plain" || h.Get("x-amz-meta-barrio") != "Granada" {
+		t.Fatalf("lectura de la copia: HTTP %d %q %v", status, body, h)
+	}
+
+	call(t, "PUT", srv.URL+"/destino/nueva.txt", "", "X-Amz-Copy-Source", "origen/con%20espacio.txt",
+		"X-Amz-Metadata-Directive", "REPLACE", "Content-Type", "text/markdown")
+	if _, _, h := call(t, "HEAD", srv.URL+"/destino/nueva.txt", ""); h.Get("Content-Type") != "text/markdown" || h.Get("x-amz-meta-barrio") != "" {
+		t.Fatalf("REPLACE no cambió los metadatos: %v", h)
+	}
+
+	status, body, _ = call(t, "PUT", srv.URL+"/origen/con espacio.txt", "", "X-Amz-Copy-Source", "/origen/con%20espacio.txt")
+	wantStatus(t, "copia sobre sí mismo", status, body, 400, "InvalidRequest")
+	status, body, _ = call(t, "PUT", srv.URL+"/destino/x", "", "X-Amz-Copy-Source", "/origen/no-existe")
+	wantStatus(t, "origen inexistente", status, body, 404, "NoSuchKey")
+	status, body, _ = call(t, "PUT", srv.URL+"/destino/x", "", "X-Amz-Copy-Source", "/origen/con%20espacio.txt", "X-Amz-Copy-Source-If-Match", `"otro"`)
+	wantStatus(t, "condición de copia", status, body, 412, "PreconditionFailed")
+}
+
+func TestDeleteObjects(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	for _, k := range []string{"a", "b", "c"} {
+		call(t, "PUT", srv.URL+"/chuspa/"+k, "x")
+	}
+	payload := "<Delete><Object><Key>a</Key></Object><Object><Key>no-existe</Key></Object>" +
+		"<Object><Key>b</Key><VersionId>v1</VersionId></Object></Delete>"
+
+	status, body, _ := call(t, "POST", srv.URL+"/chuspa?delete", payload)
+	wantStatus(t, "sin suma de integridad", status, body, 400, "InvalidRequest")
+	status, body, _ = call(t, "POST", srv.URL+"/chuspa?delete", payload, "X-Amz-Checksum-Crc32", "AAAAAA==")
+	wantStatus(t, "suma incorrecta", status, body, 400, "BadDigest")
+
+	status, body, _ = call(t, "POST", srv.URL+"/chuspa?delete", payload, "X-Amz-Checksum-Crc32", crc32Of(payload))
+	if status != 200 || !strings.Contains(body, "<Deleted><Key>a</Key></Deleted>") ||
+		!strings.Contains(body, "<Deleted><Key>no-existe</Key></Deleted>") ||
+		!strings.Contains(body, "<Error><Key>b</Key><Code>NotImplemented</Code>") {
+		t.Fatalf("borrado masivo: HTTP %d %s", status, body)
+	}
+	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/a", ""); status != 404 {
+		t.Fatalf("a sigue existiendo: HTTP %d", status)
+	}
+	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/b", ""); status != 200 {
+		t.Fatalf("b no debía borrarse: HTTP %d", status)
+	}
+	status, body, _ = call(t, "POST", srv.URL+"/chuspa?delete", "<Delete></Delete>", "X-Amz-Checksum-Crc32", crc32Of("<Delete></Delete>"))
+	wantStatus(t, "lista vacía", status, body, 400, "MalformedXML")
+}
+
+func TestListObjectsV1(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	for _, k := range []string{"a.txt", "fotos/1.jpg", "fotos/2.jpg", "z.txt"} {
+		call(t, "PUT", srv.URL+"/chuspa/"+k, "x")
+	}
+	// Con delimitador y de a un elemento: el NextMarker "fotos/" no debe repetirse.
+	var seen []string
+	marker := ""
+	for i := 0; i < 6; i++ {
+		_, body, _ := call(t, "GET", srv.URL+"/chuspa?delimiter=/&max-keys=1&marker="+marker, "")
+		var res struct {
+			IsTruncated bool
+			NextMarker  string
+			Contents    []struct{ Key string }
+			Prefixes    []struct{ Prefix string } `xml:"CommonPrefixes"`
+		}
+		if err := xml.Unmarshal([]byte(body), &res); err != nil {
+			t.Fatal(err, body)
+		}
+		for _, c := range res.Contents {
+			seen = append(seen, c.Key)
+		}
+		for _, p := range res.Prefixes {
+			seen = append(seen, p.Prefix)
+		}
+		if !res.IsTruncated {
+			break
+		}
+		marker = res.NextMarker
+	}
+	if got := strings.Join(seen, " "); got != "a.txt fotos/ z.txt" {
+		t.Fatalf("listado v1 paginado: %q", got)
+	}
+}
+
+func TestListMultipartUploads(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	for _, k := range []string{"b.bin", "a.bin", "otra/c.bin"} {
+		if status, body, _ := call(t, "POST", srv.URL+"/chuspa/"+k+"?uploads", ""); status != 200 {
+			t.Fatal(status, body)
+		}
+	}
+	_, body, _ := call(t, "GET", srv.URL+"/chuspa?uploads", "")
+	a, b, c := strings.Index(body, "<Key>a.bin</Key>"), strings.Index(body, "<Key>b.bin</Key>"), strings.Index(body, "<Key>otra/c.bin</Key>")
+	if a < 0 || b < a || c < b {
+		t.Fatalf("subidas en curso fuera de orden: %s", body)
+	}
+	_, body, _ = call(t, "GET", srv.URL+"/chuspa?uploads&prefix=otra/", "")
+	if strings.Contains(body, "a.bin") || !strings.Contains(body, "otra/c.bin") {
+		t.Fatalf("filtro por prefijo: %s", body)
+	}
+	_, body, _ = call(t, "GET", srv.URL+"/chuspa?uploads&max-uploads=1", "")
+	if !strings.Contains(body, "<IsTruncated>true</IsTruncated>") || !strings.Contains(body, "<NextKeyMarker>a.bin</NextKeyMarker>") {
+		t.Fatalf("paginación: %s", body)
+	}
+	_, body, _ = call(t, "GET", srv.URL+"/chuspa?uploads&key-marker=a.bin", "")
+	if strings.Contains(body, "<Key>a.bin</Key>") || !strings.Contains(body, "<Key>b.bin</Key>") {
+		t.Fatalf("key-marker: %s", body)
+	}
+}
+
+// Un cliente que deja de enviar el cuerpo no puede retener la conexión.
+func TestBodyIdleTimeout(t *testing.T) {
+	backend, _, err := fsbolt.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &Server{Backend: backend, Region: testRegion, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), BodyIdleTimeout: 200 * time.Millisecond}
+	srv := httptest.NewServer(api)
+	defer func() { srv.Close(); backend.Close() }()
+	call(t, "PUT", srv.URL+"/chuspa", "")
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "PUT /chuspa/lento HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nsolo un pedazo")
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reply, _ := io.ReadAll(conn)
+	if !strings.Contains(string(reply), "RequestTimeout") {
+		t.Fatalf("se esperaba RequestTimeout, se obtuvo: %q", reply)
+	}
+	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/lento", ""); status != 404 {
+		t.Fatalf("quedó un objeto a medias: HTTP %d", status)
+	}
+}
+
+func TestUploadPartCopy(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	call(t, "PUT", srv.URL+"/chuspa/origen", "0123456789")
+	_, body, _ := call(t, "POST", srv.URL+"/chuspa/destino?uploads", "")
+	var init struct{ UploadId string }
+	if err := xml.Unmarshal([]byte(body), &init); err != nil || init.UploadId == "" {
+		t.Fatal(err, body)
+	}
+	target := srv.URL + "/chuspa/destino?uploadId=" + init.UploadId + "&partNumber="
+
+	status, body, _ := call(t, "PUT", target+"1", "", "X-Amz-Copy-Source", "/chuspa/origen", "X-Amz-Copy-Source-Range", "bytes=20-30")
+	wantStatus(t, "rango fuera del origen", status, body, 400, "InvalidArgument")
+
+	var etags []string
+	for i, rng := range []string{"bytes=6-9", "bytes=0-2"} {
+		status, body, _ := call(t, "PUT", target+fmt.Sprint(i+1), "", "X-Amz-Copy-Source", "/chuspa/origen", "X-Amz-Copy-Source-Range", rng)
+		var res struct{ ETag string }
+		if err := xml.Unmarshal([]byte(body), &res); status != 200 || err != nil || res.ETag == "" {
+			t.Fatalf("copia de parte %s: HTTP %d %s", rng, status, body)
+		}
+		etags = append(etags, res.ETag)
+	}
+	// La primera parte mide menos de 5 MiB: completar debe fallar sin publicar nada.
+	complete := fmt.Sprintf("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>"+
+		"<Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>", etags[0], etags[1])
+	status, body, _ = call(t, "POST", srv.URL+"/chuspa/destino?uploadId="+init.UploadId, complete)
+	wantStatus(t, "parte intermedia pequeña", status, body, 400, "EntityTooSmall")
+
+	one := fmt.Sprintf("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>", etags[0])
+	if status, body, _ := call(t, "POST", srv.URL+"/chuspa/destino?uploadId="+init.UploadId, one); status != 200 {
+		t.Fatalf("completar: HTTP %d %s", status, body)
+	}
+	if _, body, _ := call(t, "GET", srv.URL+"/chuspa/destino", ""); body != "6789" {
+		t.Fatalf("contenido copiado por rango: %q", body)
+	}
 }

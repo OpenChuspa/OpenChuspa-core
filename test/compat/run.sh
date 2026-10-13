@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Prueba de compatibilidad con clientes reales: compila el motor, lo arranca
 # en un directorio temporal y ejecuta los criterios de aceptación del MVP
-# (MVP-ENGINE-v2.md, sección 11) con el AWS CLI, curl y, si está, boto3.
+# (MVP-ENGINE-v2.md, sección 11) con el AWS CLI, curl y los SDK de Python,
+# JavaScript y Go.
 #
-# Uso: test/compat/awscli.sh
-# Requiere: go, aws (CLI v2), curl. Opcional: python3 con boto3.
+# Uso: test/compat/run.sh
+# Requiere: go, aws (CLI v2), curl. Opcionales: python3 con boto3, y node con
+# npm. Con COMPAT_REQUIRE_ALL=1 (CI) la falta de un cliente es un error.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-WORK=$(mktemp -d)
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/chuspa-compat.XXXXXX")
 PORT=${CHUSPA_TEST_PORT:-19000}
 ENDPOINT="http://127.0.0.1:$PORT"
 BUCKET=feria-de-cali
@@ -22,7 +24,9 @@ SECRET_KEY="$(openssl rand -hex 24)"
 export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
 export AWS_EC2_METADATA_DISABLED=true AWS_PAGER="" AWS_MAX_ATTEMPTS=1
 export AWS_ACCESS_KEY_ID=$ACCESS_KEY AWS_SECRET_ACCESS_KEY=$SECRET_KEY
-export AWS_DEFAULT_REGION=cali-san-antonio-1
+# El CLI y boto3 leen AWS_DEFAULT_REGION; los SDK de JavaScript y Go, AWS_REGION.
+export AWS_DEFAULT_REGION=cali-san-antonio-1 AWS_REGION=cali-san-antonio-1
+export NODE_DISABLE_COMPILE_CACHE=1
 unset AWS_PROFILE AWS_SESSION_TOKEN
 
 s3() { aws --endpoint-url "$ENDPOINT" "$@"; }
@@ -145,23 +149,60 @@ code=$(curl -s -o sinfirma.xml -w '%{http_code}' "$ENDPOINT/")
 [ "$code" = 403 ] && grep -q AccessDenied sinfirma.xml || fail "petición sin firma: HTTP $code"
 AWS_SECRET_ACCESS_KEY=$(openssl rand -hex 24) expect_error SignatureDoesNotMatch s3 s3 ls
 AWS_ACCESS_KEY_ID=desconocida expect_error SignatureDoesNotMatch s3 s3 ls
-AWS_DEFAULT_REGION=us-east-1 expect_error SignatureDoesNotMatch s3 s3 ls
+AWS_DEFAULT_REGION=us-east-1 AWS_REGION=us-east-1 expect_error SignatureDoesNotMatch s3 s3 ls
 
 step "límites y operaciones no implementadas"
 # El servidor responde 431 y corta la conexión, así que curl sale con error.
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "x-relleno: $(head -c 100000 /dev/zero | tr '\0' a)" "$ENDPOINT/" || true)
 [ "$code" = 431 ] || fail "headers gigantes: HTTP $code"
 expect_error NotImplemented s3 s3api get-bucket-versioning --bucket "$BUCKET"
-expect_error NotImplemented s3 s3api copy-object --bucket "$BUCKET" --key copia.txt --copy-source "$BUCKET/test/salsa.txt"
 expect_error NoSuchKey s3 s3api get-object --bucket "$BUCKET" --key no-existe.txt /dev/null
 expect_error NoSuchBucket s3 s3 ls s3://no-existe-esta-chuspa
 
-if python3 -c 'import boto3' 2>/dev/null; then
-  step "boto3 en su configuración por defecto"
+step "copias entre chuspas, también de objetos grandes"
+s3 s3 mb s3://la-otra-chuspa
+s3 s3 cp "s3://$BUCKET/test/salsa.txt" s3://la-otra-chuspa/copia.txt --only-show-errors
+s3 s3 cp "s3://$BUCKET/grande.bin" s3://la-otra-chuspa/grande.bin --only-show-errors
+s3 s3 mv s3://la-otra-chuspa/copia.txt s3://la-otra-chuspa/movida.txt --only-show-errors
+s3 s3 cp s3://la-otra-chuspa/movida.txt movida.txt --only-show-errors
+cmp salsa.txt movida.txt
+s3 s3 cp s3://la-otra-chuspa/grande.bin grande.copia --only-show-errors
+cmp grande.bin grande.copia
+expect_error 404 s3 s3api head-object --bucket la-otra-chuspa --key copia.txt
+
+step "borrado masivo, listado v1 y subidas en curso"
+[ "$(s3 s3api delete-objects --bucket la-otra-chuspa --delete 'Objects=[{Key=movida.txt},{Key=grande.bin}]' --query 'length(Deleted)')" = 2 ] ||
+  fail "delete-objects no borró los dos objetos"
+[ "$(s3 s3api list-objects --bucket "$BUCKET" --prefix muchos/ --query 'length(Contents)')" = 1050 ] ||
+  fail "el listado v1 paginado no devolvió 1050 objetos"
+upload_id=$(s3 s3api create-multipart-upload --bucket la-otra-chuspa --key pendiente.bin --query UploadId --output text)
+[ "$(s3 s3api list-multipart-uploads --bucket la-otra-chuspa --query 'Uploads[0].UploadId' --output text)" = "$upload_id" ] ||
+  fail "la subida en curso no aparece en list-multipart-uploads"
+s3 s3 rb s3://la-otra-chuspa
+
+# optional <nombre> <comando para detectarlo...>: decide si se prueba un cliente.
+optional() {
+  local name=$1; shift
+  if "$@" >/dev/null 2>&1; then return 0; fi
+  [ -z "${COMPAT_REQUIRE_ALL:-}" ] || fail "falta $name y COMPAT_REQUIRE_ALL está activo"
+  step "$name no está disponible: se omite"
+  return 1
+}
+
+if optional boto3 python3 -c 'import boto3'; then
+  step "boto3"
   python3 -I "$ROOT/test/compat/boto3_flow.py" "$ENDPOINT" "$BUCKET"
-else
-  step "boto3 no está instalado: se omite"
 fi
+
+if optional "node con npm" npm --version; then
+  step "@aws-sdk/client-s3"
+  # Se instala en la carpeta temporal para no dejar node_modules en el repo.
+  cp -R "$ROOT/test/compat/js" "$WORK/js"
+  (cd "$WORK/js" && npm ci --ignore-scripts --no-audit --no-fund --silent && node flow.mjs "$ENDPOINT" "$BUCKET")
+fi
+
+step "aws-sdk-go-v2"
+(cd "$ROOT/test/compat/gosdk" && go run . "$ENDPOINT" "$BUCKET")
 
 step "los datos sobreviven a un reinicio"
 stop_server TERM
@@ -192,6 +233,16 @@ s3 s3 rb "s3://$BUCKET"
 [ -z "$(s3 s3 ls)" ] || fail "quedaron chuspas después de borrar"
 stop_server TERM
 [ -z "$(find "$WORK/data/blobs" -type f)" ] || fail "quedaron blobs después de borrar todo"
+
+step "inspect y export con el servidor detenido"
+start_server
+s3 s3 mb "s3://$BUCKET" >/dev/null
+s3 s3 cp salsa.txt "s3://$BUCKET/../../etc/passwd" --only-show-errors
+stop_server TERM
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" inspect | grep -q "^$BUCKET .* 1  *12$" || fail "inspect no resume la chuspa"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" inspect "$BUCKET" | grep -qF '"../../etc/passwd"' || fail "inspect no lista la key"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" export "$BUCKET" ../../etc/passwd exportado.txt
+cmp salsa.txt exportado.txt
 
 step "sin secretos en los logs"
 if grep -qe "$SECRET_KEY" -e 'Signature=' -e 'AWS4-HMAC-SHA256' "$WORK/server.log"; then

@@ -26,9 +26,13 @@ var version = "dev"
 const usage = `chuspa: motor de almacenamiento compatible con S3
 
 Uso:
-  chuspa serve         arranca el servidor
-  chuspa healthcheck   consulta la salud del servidor local (para contenedores)
-  chuspa version       muestra la versión
+  chuspa serve                            arranca el servidor
+  chuspa healthcheck                      consulta la salud del servidor local (para contenedores)
+  chuspa inspect [chuspa [prefijo]]       lista chuspas u objetos leyendo el índice
+  chuspa export <chuspa> <key> <archivo>  copia el contenido de un objeto a un archivo
+  chuspa version                          muestra la versión
+
+inspect y export leen CHUSPA_DATA_DIR directamente y necesitan el servidor detenido.
 
 La configuración se lee de variables de entorno CHUSPA_*; ver README.md.
 `
@@ -44,6 +48,10 @@ func main() {
 		err = serve()
 	case "healthcheck":
 		err = healthcheck()
+	case "inspect":
+		err = inspect(os.Args[2:])
+	case "export":
+		err = export(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -105,6 +113,8 @@ func serve() error {
 	log.Info("OpenChuspa escuchando", "addr", listener.Addr().String(), "region", cfg.Region,
 		"data_dir", cfg.DataDir, "version", version, "anonymous", api.Verifier == nil)
 
+	go janitor(ctx, backend, cfg.MultipartExpiry, log)
+
 	select {
 	case err := <-failed:
 		return err
@@ -143,4 +153,43 @@ func healthcheck() error {
 		return fmt.Errorf("el servidor respondió %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Márgenes del mantenimiento periódico. Un blob entra al índice instantes
+// después de publicarse, y una subida viva sigue escribiendo en su archivo de
+// staging: pasados estos tiempos, lo que no tenga referencia es basura.
+const (
+	sweepInterval  = time.Hour
+	backupInterval = 24 * time.Hour
+	blobGrace      = time.Hour
+	stagingGrace   = 24 * time.Hour
+)
+
+// janitor borra huérfanos, aborta subidas multipart abandonadas y deja una
+// copia del índice, mientras el servidor atiende peticiones.
+func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	var lastBackup time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			res, err := backend.Sweep(now, blobGrace, stagingGrace, uploadTTL)
+			switch {
+			case err != nil:
+				log.Error("falló el mantenimiento", "error", err.Error())
+			case res.Orphans > 0 || res.ExpiredUploads > 0:
+				log.Info("mantenimiento", "huerfanos", res.Orphans, "subidas_expiradas", res.ExpiredUploads)
+			}
+			if now.Sub(lastBackup) >= backupInterval {
+				if err := backend.Backup(); err != nil {
+					log.Error("falló la copia del índice", "error", err.Error())
+				} else {
+					lastBackup = now
+				}
+			}
+		}
+	}
 }

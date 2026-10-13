@@ -8,7 +8,7 @@ El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decis
 
 Proyecto en construcción, versión `0.x`: todavía no hay releases ni imagen publicada, y no es apto para producción.
 
-Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en [`test/compat/awscli.sh`](./test/compat/awscli.sh) o en las pruebas unitarias.
+Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
 
 | Operación | Estado |
 |---|---|
@@ -108,7 +108,7 @@ go test -race ./...
 # Compatibilidad con clientes reales: compila el motor, lo arranca en una
 # carpeta temporal y ejecuta los criterios de aceptación del MVP.
 # Requiere aws (CLI v2) y curl; usa boto3 si está instalado.
-test/compat/awscli.sh
+test/compat/run.sh
 
 # Fuzzing de los analizadores de entrada no confiable
 go test ./internal/chunked -run '^$' -fuzz '^FuzzReader$' -fuzztime 1m

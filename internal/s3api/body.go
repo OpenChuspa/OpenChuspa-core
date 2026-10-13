@@ -12,8 +12,10 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenChuspa/OpenChuspa-core/internal/checksum"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/chunked"
@@ -75,6 +77,7 @@ func (s *Server) openBody(r *request, limit int64) (*body, *APIError) {
 	}
 
 	var raw io.Reader = http.MaxBytesReader(r.w, r.Body, limit+chunkFramingSlack)
+	raw = &idleReader{r: raw, rc: http.NewResponseController(r.w), timeout: s.idleTimeout()}
 	if r.payload.Streaming {
 		opts := chunked.Options{Signed: r.payload.SignedChunks, Trailer: r.payload.Trailer}
 		if r.id != nil {
@@ -221,6 +224,28 @@ func bodyError(err error) *APIError {
 		return ErrIncompleteBody
 	case errors.As(err, &tooLarge):
 		return ErrEntityTooLarge
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return ErrRequestTimeout
 	}
 	return storageError(err)
+}
+
+// idleReader renueva el plazo de lectura de la conexión en cada lectura: un
+// cliente puede tardar lo que sea en subir, pero no quedarse callado.
+type idleReader struct {
+	r       io.Reader
+	rc      *http.ResponseController
+	timeout time.Duration
+}
+
+func (i *idleReader) Read(p []byte) (int, error) {
+	i.rc.SetReadDeadline(time.Now().Add(i.timeout))
+	n, err := i.r.Read(p)
+	// El plazo solo se levanta al terminar bien. Tras un error se deja puesto:
+	// net/http intenta vaciar el cuerpo antes de responder y sin plazo se
+	// quedaría esperando al mismo cliente que dejó de enviar.
+	if err == io.EOF {
+		i.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }

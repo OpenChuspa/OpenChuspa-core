@@ -10,12 +10,17 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
 	DefaultAddr    = "127.0.0.1:9000"
 	DefaultDataDir = "/data"
 	DefaultRegion  = "cali-san-antonio-1"
+
+	// DefaultMultipartExpiry es la edad a la que una subida multipart sin
+	// completar se considera abandonada.
+	DefaultMultipartExpiry = 7 * 24 * time.Hour
 
 	// MinSecretLen es el largo mínimo del secreto raíz.
 	MinSecretLen = 32
@@ -42,6 +47,8 @@ type Config struct {
 	Region         string
 	AllowAnonymous bool
 	LogFormat      string
+	// MultipartExpiry en cero desactiva la expiración.
+	MultipartExpiry time.Duration
 }
 
 // Loopback indica si el servidor escucha solo en la interfaz local.
@@ -55,6 +62,15 @@ func Load(getenv func(string) string) (Config, error) {
 		Region:    orDefault(getenv("CHUSPA_REGION"), DefaultRegion),
 		LogFormat: orDefault(getenv("CHUSPA_LOG_FORMAT"), "json"),
 		RootUser:  getenv("CHUSPA_ROOT_USER"),
+
+		MultipartExpiry: DefaultMultipartExpiry,
+	}
+	if v := getenv("CHUSPA_MULTIPART_EXPIRY"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("CHUSPA_MULTIPART_EXPIRY inválida (%q): use una duración como 168h, o 0 para desactivarla", v)
+		}
+		c.MultipartExpiry = d
 	}
 
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {

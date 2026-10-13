@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenChuspa/OpenChuspa-core/internal/storage"
 )
@@ -320,4 +321,68 @@ func mustStage(t *testing.T, b *Backend, content string) storage.Staged {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func TestSweep(t *testing.T) {
+	dir := t.TempDir()
+	b := open(t, dir)
+	b.CreateBucket(ctx, "chuspa")
+	put(t, b, "chuspa", "k", "vivo")
+	orphan, _ := b.publish(mustStage(t, b, "huérfano"))
+	mustStage(t, b, "a medias")
+	old, _ := b.CreateUpload(ctx, storage.Upload{Bucket: "chuspa", Key: "vieja"})
+	b.PutPart(ctx, "chuspa", "vieja", old, 1, mustStage(t, b, "x"), storage.PutInput{})
+	now := time.Now()
+
+	// Dentro del margen no se toca nada: podrían ser escrituras en curso.
+	res, err := b.Sweep(now, time.Hour, time.Hour, 24*time.Hour)
+	if err != nil || res.Orphans != 0 || res.ExpiredUploads != 0 {
+		t.Fatalf("pasada dentro del margen: %+v, %v", res, err)
+	}
+	if _, err := os.Stat(b.blobPath(orphan.id)); err != nil {
+		t.Fatal("se borró un blob reciente")
+	}
+
+	// Vencido el margen: se van el huérfano, el archivo de staging y la
+	// subida abandonada con su parte.
+	res, err = b.Sweep(now.Add(48*time.Hour), time.Hour, time.Hour, 24*time.Hour)
+	if err != nil || res.Orphans != 2 || res.ExpiredUploads != 1 {
+		t.Fatalf("pasada vencida: %+v, %v", res, err)
+	}
+	if got := get(t, b, "chuspa", "k"); got != "vivo" {
+		t.Fatalf("se dañó un objeto vivo: %q", got)
+	}
+	if n := countFiles(t, filepath.Join(dir, "blobs")) + countFiles(t, filepath.Join(dir, "staging")); n != 1 {
+		t.Fatalf("quedan %d archivos, se esperaba 1", n)
+	}
+	if _, err := b.ListParts(ctx, "chuspa", "vieja", old); !errors.Is(err, storage.ErrUploadNotFound) {
+		t.Fatalf("la subida abandonada sigue viva: %v", err)
+	}
+}
+
+func TestBackupAndReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	b, _, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.CreateBucket(ctx, "chuspa")
+	put(t, b, "chuspa", "k", "contenido")
+	if err := b.Backup(); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+
+	// La copia es un índice completo: sirve para reemplazar meta.db.
+	if err := os.Rename(filepath.Join(dir, "meta.db.bak"), filepath.Join(dir, "meta.db")); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := OpenReadOnly(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if got := get(t, ro, "chuspa", "k"); got != "contenido" {
+		t.Fatalf("lectura desde la copia del índice: %q", got)
+	}
 }

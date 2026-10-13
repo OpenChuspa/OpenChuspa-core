@@ -1,0 +1,10 @@
+{
+  "name": "openchuspa-compat-js",
+  "private": true,
+  "type": "module",
+  "description": "Prueba de compatibilidad de OpenChuspa con el SDK de JavaScript",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1151.0",
+    "@aws-sdk/lib-storage": "3.1151.0"
+  }
+}

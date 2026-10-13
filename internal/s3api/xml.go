@@ -104,3 +104,83 @@ type partEntry struct {
 	ETag         string
 	Size         int64
 }
+
+type copyObjectResult struct {
+	XMLName      xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyObjectResult"`
+	LastModified string
+	ETag         string
+}
+
+type deleteRequest struct {
+	XMLName xml.Name `xml:"Delete"`
+	Quiet   bool
+	Objects []struct {
+		Key       string
+		VersionID string `xml:"VersionId"`
+	} `xml:"Object"`
+}
+
+type deleteResult struct {
+	XMLName xml.Name       `xml:"http://s3.amazonaws.com/doc/2006-03-01/ DeleteResult"`
+	Deleted []deletedEntry `xml:"Deleted"`
+	Errors  []deleteError  `xml:"Error"`
+}
+
+type deletedEntry struct {
+	Key string
+}
+
+type deleteError struct {
+	Key     string
+	Code    string
+	Message string
+}
+
+type listObjectsV1Result struct {
+	XMLName        xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
+	Name           string
+	Prefix         string
+	Marker         string
+	NextMarker     string `xml:",omitempty"`
+	Delimiter      string `xml:",omitempty"`
+	MaxKeys        int
+	EncodingType   string `xml:",omitempty"`
+	IsTruncated    bool
+	Contents       []objectEntry  `xml:"Contents"`
+	CommonPrefixes []commonPrefix `xml:"CommonPrefixes"`
+}
+
+type listUploadsResult struct {
+	XMLName            xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListMultipartUploadsResult"`
+	Bucket             string
+	KeyMarker          string
+	UploadIDMarker     string `xml:"UploadIdMarker"`
+	NextKeyMarker      string `xml:",omitempty"`
+	NextUploadIDMarker string `xml:"NextUploadIdMarker,omitempty"`
+	Prefix             string
+	MaxUploads         int
+	EncodingType       string `xml:",omitempty"`
+	IsTruncated        bool
+	Uploads            []uploadEntry `xml:"Upload"`
+}
+
+type uploadEntry struct {
+	Key          string
+	UploadID     string `xml:"UploadId"`
+	Initiator    owner
+	Owner        owner
+	StorageClass string
+	Initiated    string
+}
+
+type copyPartResult struct {
+	XMLName      xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyPartResult"`
+	LastModified string
+	ETag         string
+}
+
+// tagging siempre va vacío: los tags llegan en la fase 2.
+type tagging struct {
+	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ Tagging"`
+	TagSet  struct{} `xml:"TagSet"`
+}

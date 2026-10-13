@@ -1,7 +1,10 @@
 package s3api
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +15,9 @@ import (
 
 func (s *Server) createUpload(r *request) *APIError {
 	drain(r.Request)
+	if apiErr := unsupportedWriteHeaders(r.Header); apiErr != nil {
+		return apiErr
+	}
 	meta, apiErr := metadataFromHeaders(r.Header)
 	if apiErr != nil {
 		return apiErr
@@ -84,6 +90,68 @@ func (s *Server) uploadPart(r *request) *APIError {
 		h.Set(checksum.HeaderPrefix+part.ChecksumAlgo, part.Checksum)
 	}
 	r.w.WriteHeader(http.StatusOK)
+	return nil
+}
+
+// uploadPartCopy crea una parte a partir de un objeto existente, completo o
+// por rango. Es lo que usan los clientes para copiar objetos grandes.
+func (s *Server) uploadPartCopy(r *request) *APIError {
+	drain(r.Request)
+	q := r.URL.Query()
+	number, err := strconv.Atoi(q.Get("partNumber"))
+	if err != nil || number < 1 || number > maxParts {
+		return invalidArgument("partNumber debe ser un entero entre 1 y 10000.")
+	}
+	uploadID := q.Get("uploadId")
+	srcBucket, srcKey, apiErr := copySource(r.Request)
+	if apiErr != nil {
+		return apiErr
+	}
+	upload, err := s.Backend.GetUpload(r.Context(), r.bucket, r.key, uploadID)
+	if err != nil {
+		return storageError(err)
+	}
+	obj, content, err := s.Backend.GetObject(r.Context(), srcBucket, srcKey)
+	if err != nil {
+		return storageError(err)
+	}
+	defer content.Close()
+	if apiErr := copyPreconditions(r.Request, obj.ETag); apiErr != nil {
+		return apiErr
+	}
+
+	start, length := int64(0), obj.Size
+	if h := r.Header.Get("X-Amz-Copy-Source-Range"); h != "" {
+		var ok, satisfiable bool
+		start, length, ok, satisfiable = parseRange(h, obj.Size)
+		// A diferencia de GetObject, aquí un rango inválido es un error.
+		if !ok || !satisfiable || strings.HasPrefix(h, "bytes=-") || strings.HasSuffix(h, "-") {
+			return invalidArgument("x-amz-copy-source-range debe tener la forma bytes=inicio-fin dentro del objeto.")
+		}
+	}
+	if _, err := content.Seek(start, io.SeekStart); err != nil {
+		return storageError(err)
+	}
+
+	sum := md5.New()
+	var w io.Writer = sum
+	partSum := checksum.New(upload.ChecksumAlgo)
+	if partSum != nil {
+		w = io.MultiWriter(sum, partSum)
+	}
+	staged, err := s.Backend.Stage(r.Context(), io.TeeReader(io.LimitReader(content, length), w))
+	if err != nil {
+		return storageError(err)
+	}
+	in := storage.PutInput{ETag: hex.EncodeToString(sum.Sum(nil))}
+	if partSum != nil {
+		in.ChecksumAlgo, in.Checksum = upload.ChecksumAlgo, checksum.Encode(partSum)
+	}
+	part, err := s.Backend.PutPart(r.Context(), r.bucket, r.key, uploadID, number, staged, in)
+	if err != nil {
+		return storageError(err)
+	}
+	writeXML(r.w, http.StatusOK, copyPartResult{LastModified: part.Modified.Format(timeFormat), ETag: quote(part.ETag)})
 	return nil
 }
 

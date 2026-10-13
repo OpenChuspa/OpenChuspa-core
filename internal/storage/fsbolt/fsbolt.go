@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,8 +91,9 @@ func Open(dir string) (*Backend, int, error) {
 		return nil
 	})
 	if err == nil {
+		// Nadie más escribe todavía: todo lo que no esté en el índice sobra.
 		var orphans int
-		if orphans, err = b.collectOrphans(); err == nil {
+		if orphans, err = b.collectOrphans(time.Now(), 0, 0); err == nil {
 			return b, orphans, nil
 		}
 	}
@@ -99,10 +101,103 @@ func Open(dir string) (*Backend, int, error) {
 	return nil, 0, fmt.Errorf("fsbolt: %w", err)
 }
 
+// OpenReadOnly abre un almacenamiento existente sin modificarlo, para
+// inspeccionarlo. Requiere que ningún servidor lo tenga abierto.
+func OpenReadOnly(dir string) (*Backend, error) {
+	db, err := bolt.Open(filepath.Join(dir, "meta.db"), 0o600, &bolt.Options{ReadOnly: true, Timeout: 2 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("fsbolt: no se pudo abrir el índice de %s (¿hay un servidor usándolo?): %w", dir, err)
+	}
+	return &Backend{dir: dir, db: db}, nil
+}
+
 func (b *Backend) Close() error { return b.db.Close() }
 
-// collectOrphans solo se ejecuta al abrir, antes de atender peticiones.
-func (b *Backend) collectOrphans() (int, error) {
+// SweepResult resume una pasada de mantenimiento.
+type SweepResult struct {
+	Orphans        int // archivos sin referencia borrados
+	ExpiredUploads int // subidas multipart abandonadas abortadas
+}
+
+// Sweep hace el mantenimiento periódico con el servidor atendiendo
+// peticiones: aborta las subidas multipart iniciadas hace más de uploadTTL y
+// borra los archivos sin referencia en el índice.
+//
+// Una escritura en curso tiene su archivo en disco antes de aparecer en el
+// índice, así que solo se consideran huérfanos los blobs con más de blobGrace
+// de antigüedad y los archivos de staging sin actividad desde hace stagingGrace.
+func (b *Backend) Sweep(now time.Time, blobGrace, stagingGrace, uploadTTL time.Duration) (SweepResult, error) {
+	var res SweepResult
+	var blobs []string
+	err := b.db.Update(func(tx *bolt.Tx) error {
+		var expired []string
+		err := tx.Bucket(bktUploads).ForEach(func(k, v []byte) error {
+			var u storage.Upload
+			if err := json.Unmarshal(v, &u); err != nil {
+				return err
+			}
+			if uploadTTL > 0 && now.Sub(u.Initiated) > uploadTTL {
+				expired = append(expired, string(k))
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, id := range expired {
+			removed, err := deleteUpload(tx, id)
+			if err != nil {
+				return err
+			}
+			blobs = append(blobs, removed...)
+		}
+		res.ExpiredUploads = len(expired)
+		return nil
+	})
+	if err != nil {
+		return res, err
+	}
+	b.removeBlobs(blobs...)
+	res.Orphans, err = b.collectOrphans(now, blobGrace, stagingGrace)
+	return res, err
+}
+
+// Backup deja una copia consistente del índice en meta.db.bak.
+func (b *Backend) Backup() error {
+	dst := filepath.Join(b.dir, "meta.db.bak")
+	tmp := dst + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	err = b.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(f)
+		return err
+	})
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
+// collectOrphans borra los archivos de staging y los blobs que no tienen
+// entrada en el índice y superan la antigüedad indicada. Los candidatos se
+// listan antes de leer el índice: un blob antiguo que no aparezca en una
+// lectura posterior del índice ya no puede llegar a aparecer.
+func (b *Backend) collectOrphans(now time.Time, blobGrace, stagingGrace time.Duration) (int, error) {
+	older := func(d fs.DirEntry, grace time.Duration) bool {
+		info, err := d.Info()
+		return err == nil && now.Sub(info.ModTime()) >= grace
+	}
 	staging := filepath.Join(b.dir, "staging")
 	entries, err := os.ReadDir(staging)
 	if err != nil {
@@ -110,19 +205,32 @@ func (b *Backend) collectOrphans() (int, error) {
 	}
 	removed := 0
 	for _, e := range entries {
-		if os.Remove(filepath.Join(staging, e.Name())) == nil {
+		if older(e, stagingGrace) && os.Remove(filepath.Join(staging, e.Name())) == nil {
 			removed++
 		}
 	}
 
-	live := map[string]bool{}
+	candidates := map[string]string{} // id -> ruta
+	err = filepath.WalkDir(filepath.Join(b.dir, "blobs"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if older(d, blobGrace) {
+			candidates[d.Name()] = path
+		}
+		return nil
+	})
+	if err != nil || len(candidates) == 0 {
+		return removed, err
+	}
+
 	err = b.db.View(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bktObjects).ForEach(func(_, v []byte) error {
 			var rec objectRecord
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			live[rec.Blob] = true
+			delete(candidates, rec.Blob)
 			return nil
 		}); err != nil {
 			return err
@@ -132,23 +240,19 @@ func (b *Backend) collectOrphans() (int, error) {
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
 			}
-			live[rec.Blob] = true
+			delete(candidates, rec.Blob)
 			return nil
 		})
 	})
 	if err != nil {
 		return removed, err
 	}
-	err = filepath.WalkDir(filepath.Join(b.dir, "blobs"), func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		if !live[d.Name()] && os.Remove(path) == nil {
+	for _, path := range candidates {
+		if os.Remove(path) == nil {
 			removed++
 		}
-		return nil
-	})
-	return removed, err
+	}
+	return removed, nil
 }
 
 // ---- chuspas ----
@@ -586,6 +690,33 @@ func (b *Backend) ListParts(_ context.Context, bucket, key, id string) ([]storag
 			out = append(out, r.Part)
 		}
 		return err
+	})
+	return out, err
+}
+
+func (b *Backend) ListUploads(_ context.Context, bucket string) ([]storage.Upload, error) {
+	var out []storage.Upload
+	err := b.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bktBuckets).Get([]byte(bucket)) == nil {
+			return storage.ErrBucketNotFound
+		}
+		return tx.Bucket(bktUploads).ForEach(func(k, v []byte) error {
+			var u storage.Upload
+			if err := json.Unmarshal(v, &u); err != nil {
+				return err
+			}
+			if u.Bucket == bucket {
+				u.ID = string(k)
+				out = append(out, u)
+			}
+			return nil
+		})
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Key != out[j].Key {
+			return out[i].Key < out[j].Key
+		}
+		return out[i].ID < out[j].ID
 	})
 	return out, err
 }

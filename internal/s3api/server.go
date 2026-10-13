@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/OpenChuspa/OpenChuspa-core/internal/auth"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/storage"
@@ -19,6 +20,9 @@ const (
 
 	// DefaultMaxObjectSize es el tamaño máximo de un PutObject o de una parte.
 	DefaultMaxObjectSize = 5 << 30
+
+	// DefaultBodyIdleTimeout corta las transferencias que se quedan quietas.
+	DefaultBodyIdleTimeout = 2 * time.Minute
 
 	maxXMLBody = 1 << 20
 	maxParts   = 10000
@@ -33,6 +37,16 @@ type Server struct {
 	Region        string
 	Log           *slog.Logger
 	MaxObjectSize int64
+	// BodyIdleTimeout es el tiempo máximo sin recibir ni poder enviar un solo
+	// byte del cuerpo. Por defecto, DefaultBodyIdleTimeout.
+	BodyIdleTimeout time.Duration
+}
+
+func (s *Server) idleTimeout() time.Duration {
+	if s.BodyIdleTimeout > 0 {
+		return s.BodyIdleTimeout
+	}
+	return DefaultBodyIdleTimeout
 }
 
 // request agrupa lo que los handlers necesitan de una petición ya autenticada.
@@ -47,7 +61,7 @@ type request struct {
 
 // Subrecursos de S3 que el motor todavía no implementa.
 var unsupportedSubresources = []string{
-	"accelerate", "acl", "analytics", "attributes", "cors", "delete", "encryption",
+	"accelerate", "acl", "analytics", "attributes", "cors", "encryption",
 	"intelligent-tiering", "inventory", "legal-hold", "lifecycle", "logging", "metrics",
 	"notification", "object-lock", "ownershipControls", "policy", "policyStatus",
 	"publicAccessBlock", "replication", "requestPayment", "restore", "retention",
@@ -100,14 +114,17 @@ func authError(err error) *APIError {
 
 func (s *Server) route(r *request) *APIError {
 	query := r.URL.Query()
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	r.bucket, r.key, _ = strings.Cut(path, "/")
+
+	// Leer los tags de un objeto sí se atiende: los clientes lo consultan al
+	// copiar, y la respuesta (ninguno) es cierta mientras no se puedan poner.
+	readTags := r.Method == http.MethodGet && r.key != "" && query.Has("tagging")
 	for _, sub := range unsupportedSubresources {
-		if query.Has(sub) {
+		if query.Has(sub) && !(readTags && sub == "tagging") {
 			return ErrNotImplemented
 		}
 	}
-
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	r.bucket, r.key, _ = strings.Cut(path, "/")
 
 	if r.bucket == "" {
 		if r.Method == http.MethodGet {
@@ -132,12 +149,15 @@ func (s *Server) route(r *request) *APIError {
 			case query.Has("location"):
 				return s.getBucketLocation(r)
 			case query.Has("uploads"):
-				return ErrNotImplemented // ListMultipartUploads: fase 1.1
+				return s.listUploads(r)
 			case query.Get("list-type") == "2":
 				return s.listObjectsV2(r)
 			}
-			return ErrNotImplemented // ListObjects v1: fase 1.1
+			return s.listObjectsV1(r)
 		case http.MethodPost:
+			if query.Has("delete") {
+				return s.deleteObjects(r)
+			}
 			return ErrNotImplemented
 		}
 		return ErrMethodNotAllowed
@@ -148,15 +168,21 @@ func (s *Server) route(r *request) *APIError {
 	}
 	switch r.Method {
 	case http.MethodPut:
+		copying := r.Header.Get("X-Amz-Copy-Source") != ""
 		switch {
-		case r.Header.Get("X-Amz-Copy-Source") != "":
-			return ErrNotImplemented // CopyObject y UploadPartCopy: fase 1.1
+		case copying && query.Has("uploadId"):
+			return s.uploadPartCopy(r)
+		case copying:
+			return s.copyObject(r)
 		case query.Has("uploadId"):
 			return s.uploadPart(r)
 		}
 		return s.putObject(r)
 	case http.MethodGet:
-		if query.Has("uploadId") {
+		switch {
+		case readTags:
+			return s.getObjectTagging(r)
+		case query.Has("uploadId"):
 			return s.listParts(r)
 		}
 		return s.getObject(r, true)

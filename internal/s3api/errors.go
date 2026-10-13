@@ -44,6 +44,7 @@ var (
 	ErrInvalidPartOrder      = &APIError{"InvalidPartOrder", "Las partes deben venir en orden ascendente.", http.StatusBadRequest}
 	ErrInvalidRange          = &APIError{"InvalidRange", "El rango pedido no se puede satisfacer.", http.StatusRequestedRangeNotSatisfiable}
 	ErrPreconditionFailed    = &APIError{"PreconditionFailed", "No se cumplió una de las condiciones de la petición.", http.StatusPreconditionFailed}
+	ErrRequestTimeout        = &APIError{"RequestTimeout", "La conexión estuvo demasiado tiempo sin enviar datos.", http.StatusBadRequest}
 	ErrInternal              = &APIError{"InternalError", "Error interno del servidor.", http.StatusInternalServerError}
 )
 

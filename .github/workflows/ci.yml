@@ -50,4 +50,4 @@ jobs:
           python-version: "3.x"
       - run: pip install --quiet boto3
       - run: aws --version
-      - run: test/compat/awscli.sh
+      - run: test/compat/run.sh

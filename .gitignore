@@ -2,3 +2,4 @@
 /data/
 *.test
 *.out
+/test/compat/js/node_modules/
