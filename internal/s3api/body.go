@@ -39,7 +39,8 @@ type body struct {
 	r        *request
 	reader   io.Reader
 	chunks   *chunked.Reader
-	declared int64
+	declared int64 // -1 si el cliente no declaró el tamaño
+	limit    int64
 	md5      hash.Hash
 	sha256   hash.Hash
 	sum      hash.Hash // checksum x-amz-checksum-*, si el cliente lo envía
@@ -49,8 +50,11 @@ type body struct {
 
 // openBody prepara la lectura del cuerpo con un tamaño máximo de limit bytes
 // de contenido. No lee nada todavía.
-func (s *Server) openBody(r *request, limit int64) (*body, *APIError) {
-	b := &body{r: r, md5: md5.New()}
+//
+// headerChecksum indica si un header x-amz-checksum-* describe este cuerpo.
+// No es así en CompleteMultipartUpload, donde describe el objeto final.
+func (s *Server) openBody(r *request, limit int64, headerChecksum bool) (*body, *APIError) {
+	b := &body{r: r, md5: md5.New(), limit: limit}
 
 	if r.payload.Streaming {
 		n, err := strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64)
@@ -59,9 +63,8 @@ func (s *Server) openBody(r *request, limit int64) (*body, *APIError) {
 		}
 		b.declared = n
 	} else {
-		if r.ContentLength < 0 {
-			return nil, ErrMissingContentLength
-		}
+		// Con Transfer-Encoding: chunked no hay tamaño declarado (-1): el
+		// cuerpo termina donde lo diga el encuadre HTTP.
 		b.declared = r.ContentLength
 	}
 	if b.declared > limit {
@@ -71,6 +74,9 @@ func (s *Server) openBody(r *request, limit int64) (*body, *APIError) {
 	algo, want, apiErr := declaredChecksum(r.Request)
 	if apiErr != nil {
 		return nil, apiErr
+	}
+	if want != "" && !headerChecksum {
+		algo, want = "", ""
 	}
 	if algo != "" {
 		b.sumAlgo, b.sumWant, b.sum = algo, want, checksum.New(algo)
@@ -87,7 +93,11 @@ func (s *Server) openBody(r *request, limit int64) (*body, *APIError) {
 		raw = b.chunks
 	}
 	// Un byte de más basta para detectar un cuerpo mayor al declarado.
-	raw = io.LimitReader(raw, b.declared+1)
+	if b.declared >= 0 {
+		raw = io.LimitReader(raw, b.declared+1)
+	} else {
+		raw = io.LimitReader(raw, limit+1)
+	}
 
 	writers := []io.Writer{b.md5}
 	if r.payload.SHA256 != "" {
@@ -130,8 +140,11 @@ func declaredChecksum(r *http.Request) (algo, want string, apiErr *APIError) {
 // verify comprueba, con todo el cuerpo ya leído, el tamaño y los hashes
 // declarados. size es la cantidad de bytes de contenido leídos.
 func (b *body) verify(size int64) *APIError {
-	if size != b.declared {
+	if b.declared >= 0 && size != b.declared {
 		return ErrIncompleteBody
+	}
+	if size > b.limit {
+		return ErrEntityTooLarge
 	}
 	if b.sha256 != nil {
 		got := hex.EncodeToString(b.sha256.Sum(nil))
@@ -177,7 +190,7 @@ func (s *Server) ingest(r *request) (*ingested, *APIError) {
 	if limit <= 0 {
 		limit = DefaultMaxObjectSize
 	}
-	b, apiErr := s.openBody(r, limit)
+	b, apiErr := s.openBody(r, limit, true)
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -197,8 +210,8 @@ func (s *Server) ingest(r *request) (*ingested, *APIError) {
 }
 
 // readXML lee y verifica un cuerpo XML pequeño.
-func (s *Server) readXML(r *request) ([]byte, *APIError) {
-	b, apiErr := s.openBody(r, maxXMLBody)
+func (s *Server) readXML(r *request, headerChecksum bool) ([]byte, *APIError) {
+	b, apiErr := s.openBody(r, maxXMLBody, headerChecksum)
 	if apiErr != nil {
 		if apiErr == ErrEntityTooLarge {
 			return nil, ErrMalformedXML
@@ -210,6 +223,9 @@ func (s *Server) readXML(r *request) ([]byte, *APIError) {
 		return nil, bodyError(err)
 	}
 	if apiErr := b.verify(int64(len(data))); apiErr != nil {
+		if apiErr == ErrEntityTooLarge {
+			return nil, ErrMalformedXML
+		}
 		return nil, apiErr
 	}
 	return data, nil

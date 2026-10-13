@@ -26,15 +26,20 @@ func metadataFromHeaders(h http.Header) (storage.Metadata, *APIError) {
 		ContentDisposition: h.Get("Content-Disposition"),
 		ContentLanguage:    h.Get("Content-Language"),
 		CacheControl:       h.Get("Cache-Control"),
+		Expires:            h.Get("Expires"),
 	}
-	// aws-chunked describe el transporte, no el objeto.
-	var encodings []string
-	for _, e := range strings.Split(h.Get("Content-Encoding"), ",") {
-		if e = strings.TrimSpace(e); e != "" && !strings.EqualFold(e, "aws-chunked") {
-			encodings = append(encodings, e)
+	// aws-chunked describe el transporte, no el objeto: se quita y el resto
+	// se conserva tal como llegó.
+	m.ContentEncoding = h.Get("Content-Encoding")
+	if strings.Contains(strings.ToLower(m.ContentEncoding), "aws-chunked") {
+		var encodings []string
+		for _, e := range strings.Split(m.ContentEncoding, ",") {
+			if e = strings.TrimSpace(e); e != "" && !strings.EqualFold(e, "aws-chunked") {
+				encodings = append(encodings, e)
+			}
 		}
+		m.ContentEncoding = strings.Join(encodings, ", ")
 	}
-	m.ContentEncoding = strings.Join(encodings, ",")
 
 	size := 0
 	for name, values := range h {
@@ -96,12 +101,16 @@ func (s *Server) putObject(r *request) *APIError {
 	if apiErr != nil {
 		return apiErr
 	}
+	cond, apiErr := writePrecondition(r.Header)
+	if apiErr != nil {
+		return apiErr
+	}
 	in, apiErr := s.ingest(r)
 	if apiErr != nil {
 		return apiErr
 	}
 	obj, err := s.Backend.PutObject(r.Context(), r.bucket, r.key, in.staged, storage.PutInput{
-		ETag: in.etag, ChecksumAlgo: in.checksumAlgo, Checksum: in.checksum, Metadata: meta,
+		ETag: in.etag, ChecksumAlgo: in.checksumAlgo, Checksum: in.checksum, Metadata: meta, Cond: cond,
 	})
 	if err != nil {
 		return storageError(err)
@@ -111,6 +120,25 @@ func (s *Server) putObject(r *request) *APIError {
 	setChecksumHeaders(h, obj.ChecksumAlgo, obj.Checksum)
 	r.w.WriteHeader(http.StatusOK)
 	return nil
+}
+
+// writePrecondition interpreta las escrituras condicionales: If-None-Match: *
+// (crear solo si no existe) e If-Match: <etag> (reemplazar solo esa versión).
+func writePrecondition(h http.Header) (storage.Precondition, *APIError) {
+	var cond storage.Precondition
+	if v := strings.TrimSpace(h.Get("If-None-Match")); v != "" {
+		if v != "*" {
+			return cond, ErrNotImplemented // S3 solo admite * en escrituras
+		}
+		cond.IfNoneMatch = true
+	}
+	if v := strings.TrimSpace(h.Get("If-Match")); v != "" {
+		if strings.Contains(v, ",") {
+			return cond, ErrNotImplemented
+		}
+		cond.IfMatch = unquote(v)
+	}
+	return cond, nil
 }
 
 func setChecksumHeaders(h http.Header, algo, sum string) {
@@ -143,18 +171,42 @@ func (s *Server) getObject(r *request, withBody bool) *APIError {
 	if err != nil {
 		return storageError(err)
 	}
+	// Leer una sola parte de un objeto multipart no está soportado, y
+	// devolver el objeto entero en su lugar sería mentir.
+	if r.URL.Query().Has("partNumber") {
+		return ErrNotImplemented
+	}
 
 	h := r.w.Header()
 	h.Set("ETag", quote(obj.ETag))
 	h.Set("Last-Modified", obj.Modified.Format(http.TimeFormat))
 	h.Set("Accept-Ranges", "bytes")
 
-	if v := r.Header.Get("If-Match"); v != "" && !etagMatches(v, obj.ETag) {
-		return ErrPreconditionFailed
+	// Condiciones, con la precedencia de HTTP: las de ETag mandan sobre las
+	// de fecha, que se comparan con resolución de un segundo.
+	modified := obj.Modified.Truncate(time.Second)
+	ifMatch, ifNoneMatch := r.Header.Get("If-Match"), r.Header.Get("If-None-Match")
+	switch {
+	case ifMatch != "":
+		if !etagMatches(ifMatch, obj.ETag) {
+			return ErrPreconditionFailed
+		}
+	case r.Header.Get("If-Unmodified-Since") != "":
+		if t, err := http.ParseTime(r.Header.Get("If-Unmodified-Since")); err == nil && modified.After(t) {
+			return ErrPreconditionFailed
+		}
 	}
-	if v := r.Header.Get("If-None-Match"); v != "" && etagMatches(v, obj.ETag) {
-		r.w.WriteHeader(http.StatusNotModified)
-		return nil
+	switch {
+	case ifNoneMatch != "":
+		if etagMatches(ifNoneMatch, obj.ETag) {
+			r.w.WriteHeader(http.StatusNotModified)
+			return nil
+		}
+	case r.Header.Get("If-Modified-Since") != "":
+		if t, err := http.ParseTime(r.Header.Get("If-Modified-Since")); err == nil && !modified.After(t) {
+			r.w.WriteHeader(http.StatusNotModified)
+			return nil
+		}
 	}
 
 	start, length, partial, satisfiable := parseRange(r.Header.Get("Range"), obj.Size)
@@ -184,6 +236,14 @@ func (s *Server) getObject(r *request, withBody bool) *APIError {
 	setIfNotEmpty(h, "Content-Disposition", obj.ContentDisposition)
 	setIfNotEmpty(h, "Content-Language", obj.ContentLanguage)
 	setIfNotEmpty(h, "Cache-Control", obj.CacheControl)
+	setIfNotEmpty(h, "Expires", obj.Expires)
+	// El cliente puede pedir que la respuesta lleve otros headers, por ejemplo
+	// para forzar la descarga desde un navegador.
+	for param, header := range responseOverrides {
+		if v := r.URL.Query().Get(param); v != "" {
+			h.Set(header, v)
+		}
+	}
 	for k, v := range obj.User {
 		// Asignación directa: http.Header.Set pondría "X-Amz-Meta-Barrio" y los
 		// SDK devuelven el nombre del metadato tal como llega.
@@ -330,7 +390,7 @@ func (s *Server) deleteObjects(r *request) *APIError {
 	if algo, _, _ := declaredChecksum(r.Request); algo == "" && r.Header.Get("Content-MD5") == "" {
 		return invalidRequest("Falta Content-MD5 o un header x-amz-checksum-*.")
 	}
-	data, apiErr := s.readXML(r)
+	data, apiErr := s.readXML(r, true)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -341,11 +401,16 @@ func (s *Server) deleteObjects(r *request) *APIError {
 	var out deleteResult
 	for _, o := range in.Objects {
 		apiErr := validateKey(o.Key)
-		if apiErr == nil && o.VersionID != "" {
-			apiErr = ErrNotImplemented
+		if apiErr == nil && o.VersionID != "" && o.VersionID != nullVersion {
+			apiErr = ErrNoSuchVersion
+		}
+		if apiErr == nil && (o.LastModifiedTime != "" || o.Size != "") {
+			apiErr = ErrNotImplemented // solo se soporta la condición por ETag
 		}
 		if apiErr == nil {
-			if err := s.Backend.DeleteObject(r.Context(), r.bucket, o.Key); err != nil {
+			err := s.Backend.DeleteObject(r.Context(), r.bucket, o.Key, unquote(o.ETag))
+			// Con una condición, que el objeto no exista también es un error.
+			if err != nil {
 				apiErr = storageError(err)
 			}
 		}
@@ -362,6 +427,15 @@ func (s *Server) deleteObjects(r *request) *APIError {
 	}
 	writeXML(r.w, http.StatusOK, out)
 	return nil
+}
+
+var responseOverrides = map[string]string{
+	"response-content-type":        "Content-Type",
+	"response-content-language":    "Content-Language",
+	"response-content-encoding":    "Content-Encoding",
+	"response-content-disposition": "Content-Disposition",
+	"response-cache-control":       "Cache-Control",
+	"response-expires":             "Expires",
 }
 
 func etagMatches(header, etag string) bool {
@@ -381,7 +455,14 @@ func setIfNotEmpty(h http.Header, name, value string) {
 }
 
 func (s *Server) deleteObject(r *request) *APIError {
-	if err := s.Backend.DeleteObject(r.Context(), r.bucket, r.key); err != nil {
+	if r.Header.Get("X-Amz-If-Match-Last-Modified-Time") != "" || r.Header.Get("X-Amz-If-Match-Size") != "" {
+		return ErrNotImplemented
+	}
+	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+	if strings.Contains(ifMatch, ",") {
+		return ErrNotImplemented
+	}
+	if err := s.Backend.DeleteObject(r.Context(), r.bucket, r.key, unquote(ifMatch)); err != nil {
 		return storageError(err)
 	}
 	r.w.WriteHeader(http.StatusNoContent)

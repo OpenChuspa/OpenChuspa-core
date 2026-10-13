@@ -6,6 +6,9 @@ const (
 	xmlns      = "http://s3.amazonaws.com/doc/2006-03-01/"
 	timeFormat = "2006-01-02T15:04:05.000Z"
 	ownerID    = "openchuspa"
+
+	// nullVersion es el identificador de versión de un objeto sin versionar.
+	nullVersion = "null"
 )
 
 type owner struct {
@@ -17,11 +20,15 @@ type listBucketsResult struct {
 	XMLName xml.Name      `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListAllMyBucketsResult"`
 	Owner   owner         `xml:"Owner"`
 	Buckets []bucketEntry `xml:"Buckets>Bucket"`
+	// ContinuationToken solo aparece si quedaron chuspas por listar.
+	ContinuationToken string `xml:",omitempty"`
+	Prefix            string `xml:",omitempty"`
 }
 
 type bucketEntry struct {
 	Name         string
 	CreationDate string
+	BucketRegion string
 }
 
 type locationConstraint struct {
@@ -50,6 +57,7 @@ type objectEntry struct {
 	LastModified string
 	ETag         string
 	Size         int64
+	Owner        *owner `xml:",omitempty"`
 	StorageClass string
 }
 
@@ -117,6 +125,10 @@ type deleteRequest struct {
 	Objects []struct {
 		Key       string
 		VersionID string `xml:"VersionId"`
+		// Condiciones opcionales del borrado.
+		ETag             string
+		LastModifiedTime string
+		Size             string
 	} `xml:"Object"`
 }
 
@@ -183,4 +195,31 @@ type copyPartResult struct {
 type tagging struct {
 	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ Tagging"`
 	TagSet  struct{} `xml:"TagSet"`
+}
+
+type listVersionsResult struct {
+	XMLName             xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListVersionsResult"`
+	Name                string
+	Prefix              string
+	KeyMarker           string
+	VersionIDMarker     string `xml:"VersionIdMarker"`
+	NextKeyMarker       string `xml:",omitempty"`
+	NextVersionIDMarker string `xml:"NextVersionIdMarker,omitempty"`
+	Delimiter           string `xml:",omitempty"`
+	MaxKeys             int
+	EncodingType        string `xml:",omitempty"`
+	IsTruncated         bool
+	Versions            []versionEntry `xml:"Version"`
+	CommonPrefixes      []commonPrefix `xml:"CommonPrefixes"`
+}
+
+type versionEntry struct {
+	Key          string
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool
+	LastModified string
+	ETag         string
+	Size         int64
+	Owner        owner
+	StorageClass string
 }

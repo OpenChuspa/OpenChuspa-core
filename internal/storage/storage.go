@@ -18,6 +18,7 @@ var (
 	ErrInvalidPart    = errors.New("storage: parte inexistente o con ETag distinto")
 	ErrPartOrder      = errors.New("storage: las partes no vienen en orden ascendente")
 	ErrPartTooSmall   = errors.New("storage: una parte que no es la última es menor al mínimo")
+	ErrPrecondition   = errors.New("storage: no se cumple la condición sobre el objeto existente")
 	ErrBadDigest      = errors.New("storage: el checksum declarado no coincide con el contenido")
 )
 
@@ -37,6 +38,7 @@ type Metadata struct {
 	ContentDisposition string            `json:"contentDisposition,omitempty"`
 	ContentLanguage    string            `json:"contentLanguage,omitempty"`
 	CacheControl       string            `json:"cacheControl,omitempty"`
+	Expires            string            `json:"expires,omitempty"`
 	User               map[string]string `json:"user,omitempty"`
 }
 
@@ -51,6 +53,18 @@ type Object struct {
 	// verificado al subir; Checksum va en base64.
 	ChecksumAlgo string `json:"checksumAlgo,omitempty"`
 	Checksum     string `json:"checksum,omitempty"`
+	// UploadID es la subida multipart que creó el objeto, si la hubo. Permite
+	// responder igual cuando un cliente reintenta completar la misma subida.
+	UploadID string `json:"uploadId,omitempty"`
+}
+
+// Precondition condiciona una escritura o un borrado al estado actual del
+// objeto. Se evalúa dentro de la misma transacción que aplica el cambio.
+type Precondition struct {
+	// IfMatch exige que el objeto exista con ese ETag ("*" acepta cualquiera).
+	IfMatch string
+	// IfNoneMatch exige que el objeto no exista.
+	IfNoneMatch bool
 }
 
 // Staged es contenido ya escrito y sincronizado en disco, pendiente de
@@ -67,6 +81,7 @@ type PutInput struct {
 	ChecksumAlgo string
 	Checksum     string
 	Metadata     Metadata
+	Cond         Precondition
 }
 
 // ListInput son los parámetros de un listado de objetos.
@@ -134,7 +149,9 @@ type Backend interface {
 	HeadObject(ctx context.Context, bucket, key string) (Object, error)
 	// GetObject devuelve el objeto y su contenido; quien llama cierra el lector.
 	GetObject(ctx context.Context, bucket, key string) (Object, io.ReadSeekCloser, error)
-	DeleteObject(ctx context.Context, bucket, key string) error
+	// DeleteObject borra el objeto. Con ifMatch no vacío, solo si existe con
+	// ese ETag.
+	DeleteObject(ctx context.Context, bucket, key, ifMatch string) error
 	ListObjects(ctx context.Context, bucket string, in ListInput) (ListOutput, error)
 
 	CreateUpload(ctx context.Context, u Upload) (string, error)
@@ -146,7 +163,8 @@ type Backend interface {
 	ListUploads(ctx context.Context, bucket string) ([]Upload, error)
 	// CompleteUpload une las partes declaradas y publica el objeto. Si
 	// checksum no es vacío, debe coincidir con el del objeto resultante.
-	CompleteUpload(ctx context.Context, bucket, key, uploadID string, parts []CompletedPart, checksum string) (Object, error)
+	// Completar dos veces la misma subida devuelve el mismo objeto.
+	CompleteUpload(ctx context.Context, bucket, key, uploadID string, parts []CompletedPart, checksum string, cond Precondition) (Object, error)
 	AbortUpload(ctx context.Context, bucket, key, uploadID string) error
 
 	Close() error

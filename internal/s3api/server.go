@@ -65,7 +65,7 @@ var unsupportedSubresources = []string{
 	"intelligent-tiering", "inventory", "legal-hold", "lifecycle", "logging", "metrics",
 	"notification", "object-lock", "ownershipControls", "policy", "policyStatus",
 	"publicAccessBlock", "replication", "requestPayment", "restore", "retention",
-	"select", "tagging", "torrent", "versionId", "versioning", "versions", "website",
+	"select", "tagging", "torrent", "versioning", "website",
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +148,8 @@ func (s *Server) route(r *request) *APIError {
 			switch {
 			case query.Has("location"):
 				return s.getBucketLocation(r)
+			case query.Has("versions"):
+				return s.listObjectVersions(r)
 			case query.Has("uploads"):
 				return s.listUploads(r)
 			case query.Get("list-type") == "2":
@@ -165,6 +167,10 @@ func (s *Server) route(r *request) *APIError {
 
 	if err := validateKey(r.key); err != nil {
 		return err
+	}
+	// Sin versionado, la única versión de un objeto es "null".
+	if v := query.Get("versionId"); v != "" && v != nullVersion {
+		return ErrNoSuchVersion
 	}
 	switch r.Method {
 	case http.MethodPut:
@@ -225,6 +231,8 @@ func storageError(err error) *APIError {
 		return ErrEntityTooSmall
 	case errors.Is(err, storage.ErrBadDigest):
 		return ErrBadDigest
+	case errors.Is(err, storage.ErrPrecondition):
+		return ErrPreconditionFailed
 	}
 	return &APIError{"InternalError", err.Error(), http.StatusInternalServerError}
 }

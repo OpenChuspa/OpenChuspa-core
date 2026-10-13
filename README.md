@@ -6,25 +6,28 @@ El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decis
 
 ## Estado
 
-Proyecto en construcción, versión `0.x`: todavía no hay releases ni imagen publicada, y no es apto para producción.
+Proyecto en construcción, versión `0.x`: todavía no hay releases ni imagen publicada, y no ha pasado una auditoría de seguridad externa. No lo use para datos que no pueda perder.
 
-Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
+Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en CI, en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
 
 | Operación | Estado |
 |---|---|
 | ListBuckets, CreateBucket, HeadBucket, GetBucketLocation, DeleteBucket | Funciona |
-| PutObject, GetObject (con `Range`), HeadObject, DeleteObject | Funciona |
-| ListObjectsV2 (prefijo, delimitador, paginación, `encoding-type=url`) | Funciona |
-| CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, ListParts | Funciona |
+| PutObject, GetObject (con `Range` y condiciones), HeadObject, DeleteObject, DeleteObjects | Funciona |
+| Escrituras condicionales (`If-None-Match: *`, `If-Match`) en PutObject y CompleteMultipartUpload | Funciona |
+| CopyObject y UploadPartCopy (copias grandes) | Funciona |
+| ListObjectsV2 y ListObjects v1 (prefijo, delimitador, paginación, `encoding-type=url`) | Funciona |
+| CreateMultipartUpload, UploadPart, CompleteMultipartUpload, AbortMultipartUpload, ListParts, ListMultipartUploads | Funciona |
 | Autenticación SigV4 por header, con ventana de 15 minutos | Funciona |
-| Cuerpos `aws-chunked` firmados y sin firmar, con trailers | Funciona (pruebas propias y vectores de AWS) |
+| Cuerpos `aws-chunked` firmados y sin firmar, con trailers | Funciona |
 | Checksums CRC32, CRC32C, CRC64NVME, SHA-1 y SHA-256 | Funciona |
-| DeleteObjects, CopyObject, ListObjects v1, ListMultipartUploads | `NotImplemented` (fase 1.1) |
-| URLs prefirmadas, versionado, ACL, políticas, tags, CORS, lifecycle | `NotImplemented` |
+| ListObjectVersions y `versionId=null` | Solo la vista de una chuspa sin versionado |
+| GetObjectTagging | Siempre responde vacío: aún no se pueden poner tags |
+| URLs prefirmadas, versionado, ACL, políticas, tags, CORS, lifecycle, object lock, cifrado | `NotImplemented` |
 
-Clientes probados de punta a punta: **AWS CLI v2**, **boto3** y **curl**. Faltan `@aws-sdk/client-s3`, `aws-sdk-go-v2` como cliente y `ceph/s3-tests`.
+Clientes probados de punta a punta en CI: **AWS CLI v2**, **boto3**, **`@aws-sdk/client-s3`**, **`aws-sdk-go-v2`** y **curl**. De `ceph/s3-tests` pasan 222 pruebas de 744 ejecutadas; el detalle está en [`docs/compatibilidad.md`](./docs/compatibilidad.md).
 
-Lo que no está implementado responde `501 NotImplemented`; nunca un éxito falso.
+Lo que no está implementado responde `501 NotImplemented`, y un header que pida algo que el motor no hace (ACL pública, cifrado, tags, object lock) se rechaza en vez de ignorarse: nunca un éxito falso.
 
 ## Inicio rápido
 
@@ -52,7 +55,20 @@ aws s3 cp salsa.txt s3://feria-de-cali/test/salsa.txt
 aws s3 ls s3://feria-de-cali/test/
 ```
 
-El direccionamiento es por ruta (`/chuspa/key`), probado con el endpoint por IP (`http://127.0.0.1:9000`). El estilo de host virtual (`chuspa.host`) no está soportado: si un SDK lo elige, hay que activarle *path style*.
+El direccionamiento es por ruta (`/chuspa/key`). El estilo de host virtual (`chuspa.host`) no está soportado: en los SDK de JavaScript y Go hay que activar *path style* (`forcePathStyle` / `UsePathStyle`).
+
+### Con Docker
+
+Todavía no hay imagen publicada; se construye desde el repositorio:
+
+```bash
+mkdir -p secrets && openssl rand -hex 24 > secrets/chuspa_root_password
+chmod 600 secrets/chuspa_root_password
+echo "CHUSPA_ROOT_USER=mi-llave" > .env
+docker compose up -d --build
+```
+
+La imagen es distroless: sin shell, sin root, con el sistema de archivos de solo lectura y sin capabilities. El puerto se publica solo en loopback.
 
 ## Configuración
 
@@ -66,6 +82,7 @@ El direccionamiento es por ruta (`/chuspa/key`), probado con el endpoint por IP 
 | `CHUSPA_REGION` | `cali-san-antonio-1` | Región que reporta el servidor y que exige en la firma. |
 | `CHUSPA_ALLOW_ANONYMOUS` | `false` | Sin autenticación. Solo se acepta escuchando en loopback. |
 | `CHUSPA_LOG_FORMAT` | `json` | `json` o `text`. |
+| `CHUSPA_MULTIPART_EXPIRY` | `168h` | Edad a la que una subida multipart sin completar se aborta sola. `0` la desactiva. |
 
 El servidor **no arranca** sin credenciales, con un secreto corto, en modo anónimo fuera de loopback, ni con las credenciales de ejemplo de la documentación fuera de loopback.
 
@@ -82,10 +99,21 @@ No hay TLS propio todavía: fuera de loopback necesita un proxy con TLS delante,
 
 La key de un objeto vive solo en el índice y nunca forma parte de una ruta de archivo, así que `../../etc/passwd` es un nombre como cualquier otro. Cada escritura va a `staging/`, se sincroniza a disco, se mueve a `blobs/` y solo entonces se confirma en el índice: una caída deja el objeto anterior o el nuevo, nunca uno a medias. Al arrancar se borran los restos de escrituras interrumpidas.
 
+Con el servidor en marcha, cada hora se borran los blobs sin referencia y se abortan las subidas multipart abandonadas, y cada día queda una copia consistente del índice en `meta.db.bak`. Si `meta.db` se daña, se detiene el servidor y se reemplaza por esa copia; los objetos escritos después de la copia se pierden del índice y sus blobs se borran en el siguiente arranque.
+
+Como las keys viven en el índice, los datos no se inspeccionan con `ls`. Con el servidor detenido:
+
+```bash
+export CHUSPA_DATA_DIR=./data
+./chuspa inspect                          # chuspas, con cantidad de objetos y bytes
+./chuspa inspect feria-de-cali test/      # objetos de una chuspa, por prefijo
+./chuspa export feria-de-cali test/salsa.txt ./salsa.txt
+```
+
 ## Código
 
 ```
-cmd/chuspa/              binario: serve, healthcheck, version
+cmd/chuspa/              binario: serve, healthcheck, inspect, export, version
 internal/config/         variables de entorno y validación de arranque
 internal/s3api/          enrutado, handlers, XML y catálogo de errores
 internal/auth/           verificación SigV4
@@ -95,6 +123,7 @@ internal/storage/        interfaz Backend
 internal/storage/fsbolt/ blobs en disco + índice bbolt
 internal/httpx/          request-id, log de acceso, pánicos, límite de conexiones
 test/compat/             pruebas con clientes reales
+test/s3tests/            configuración y lista de pruebas de ceph/s3-tests
 ```
 
 Dependencias en tiempo de ejecución: la biblioteca estándar y `go.etcd.io/bbolt` (MIT). `aws-sdk-go-v2` (Apache-2.0) se usa solo en pruebas.
@@ -107,8 +136,15 @@ go test -race ./...
 
 # Compatibilidad con clientes reales: compila el motor, lo arranca en una
 # carpeta temporal y ejecuta los criterios de aceptación del MVP.
-# Requiere aws (CLI v2) y curl; usa boto3 si está instalado.
+# Requiere aws (CLI v2) y curl; usa boto3 y Node.js si están instalados.
 test/compat/run.sh
+
+# Conformidad con ceph/s3-tests: las pruebas que ya pasan no pueden dejar de pasar
+test/s3tests/run.sh
+
+# Análisis estático, vulnerabilidades y licencias, con las versiones del CI
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # Fuzzing de los analizadores de entrada no confiable
 go test ./internal/chunked -run '^$' -fuzz '^FuzzReader$' -fuzztime 1m
@@ -118,11 +154,14 @@ go test ./internal/s3api -run '^$' -fuzz '^FuzzParseRange$' -fuzztime 1m
 
 La suite de compatibilidad genera credenciales aleatorias en cada ejecución y aísla al AWS CLI de la configuración y los perfiles de quien la corre.
 
-## Pendiente para cerrar el MVP
+## Seguridad, contribuciones y licencia
 
-- Licencia y archivos del proyecto (`LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, `GOVERNANCE.md`): dependen de las decisiones de la sección 14 del diseño.
-- Imagen distroless firmada, `docker-compose.yml` y primer release.
-- `ceph/s3-tests` y los SDK de JavaScript y Go en CI; `govulncheck`, `staticcheck`, CodeQL y verificación de licencias.
-- Recolección periódica de huérfanos y expiración de subidas multipart abandonadas (hoy solo se limpia al arrancar).
-- Subcomando `chuspa inspect`, copia periódica y reconstrucción del índice.
-- Tiempo máximo de inactividad durante la lectura del cuerpo de una subida.
+- Las vulnerabilidades se reportan en privado: [SECURITY.md](./SECURITY.md).
+- Para contribuir: [CONTRIBUTING.md](./CONTRIBUTING.md) y [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Quién decide y cómo: [GOVERNANCE.md](./GOVERNANCE.md).
+- Licencia: [Apache-2.0](./LICENSE).
+
+## Pendiente
+
+- Primer release `0.1.0`: el workflow de release (imagen multi-arquitectura firmada con cosign, SBOM, provenance y binarios con sumas firmadas) está escrito y nunca se ha ejecutado.
+- Reconstruir el índice a partir de los blobs: hoy la recuperación es la copia diaria `meta.db.bak`.
+- Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, TLS nativo, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.

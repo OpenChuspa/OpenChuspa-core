@@ -28,6 +28,7 @@ var (
 	ErrInvalidKey            = &APIError{"InvalidArgument", "La key debe ser UTF-8 válido.", http.StatusBadRequest}
 	ErrNoSuchBucket          = &APIError{"NoSuchBucket", "La chuspa no existe.", http.StatusNotFound}
 	ErrNoSuchKey             = &APIError{"NoSuchKey", "El objeto no existe.", http.StatusNotFound}
+	ErrNoSuchVersion         = &APIError{"NoSuchVersion", "La versión indicada no existe: OpenChuspa todavía no versiona objetos.", http.StatusNotFound}
 	ErrNoSuchUpload          = &APIError{"NoSuchUpload", "La subida multipart no existe; pudo haber sido abortada o completada.", http.StatusNotFound}
 	ErrBucketAlreadyOwned    = &APIError{"BucketAlreadyOwnedByYou", "La chuspa ya existe y es suya.", http.StatusConflict}
 	ErrBucketNotEmpty        = &APIError{"BucketNotEmpty", "La chuspa no está vacía.", http.StatusConflict}

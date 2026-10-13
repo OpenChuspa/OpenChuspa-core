@@ -416,7 +416,7 @@ func (b *Backend) PutObject(_ context.Context, bucket, key string, s storage.Sta
 			return storage.ErrBucketNotFound
 		}
 		var err error
-		old, err = putObject(tx, bucket, key, rec)
+		old, err = putObject(tx, bucket, key, rec, in.Cond)
 		return err
 	})
 	if err != nil {
@@ -427,17 +427,37 @@ func (b *Backend) PutObject(_ context.Context, bucket, key string, s storage.Sta
 	return rec.Object, nil
 }
 
+// checkPrecondition evalúa cond contra el registro actual (nil si no existe).
+func checkPrecondition(prev *objectRecord, cond storage.Precondition) error {
+	if cond.IfNoneMatch && prev != nil {
+		return storage.ErrPrecondition
+	}
+	if cond.IfMatch != "" {
+		if prev == nil {
+			return storage.ErrObjectNotFound
+		}
+		if cond.IfMatch != "*" && cond.IfMatch != prev.ETag {
+			return storage.ErrPrecondition
+		}
+	}
+	return nil
+}
+
 // putObject escribe el registro y devuelve el blob que reemplaza, si lo hay.
-func putObject(tx *bolt.Tx, bucket, key string, rec objectRecord) (string, error) {
+func putObject(tx *bolt.Tx, bucket, key string, rec objectRecord, cond storage.Precondition) (string, error) {
 	objects := tx.Bucket(bktObjects)
 	k := objectKey(bucket, key)
 	var old string
-	if prev := objects.Get(k); prev != nil {
-		var p objectRecord
-		if err := json.Unmarshal(prev, &p); err != nil {
+	var prev *objectRecord
+	if v := objects.Get(k); v != nil {
+		prev = new(objectRecord)
+		if err := json.Unmarshal(v, prev); err != nil {
 			return "", err
 		}
-		old = p.Blob
+		old = prev.Blob
+	}
+	if err := checkPrecondition(prev, cond); err != nil {
+		return "", err
 	}
 	v, err := json.Marshal(rec)
 	if err != nil {
@@ -485,7 +505,7 @@ func (b *Backend) GetObject(_ context.Context, bucket, key string) (storage.Obje
 	}
 }
 
-func (b *Backend) DeleteObject(_ context.Context, bucket, key string) error {
+func (b *Backend) DeleteObject(_ context.Context, bucket, key, ifMatch string) error {
 	var old string
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bktBuckets).Get([]byte(bucket)) == nil {
@@ -495,10 +515,16 @@ func (b *Backend) DeleteObject(_ context.Context, bucket, key string) error {
 		k := objectKey(bucket, key)
 		v := objects.Get(k)
 		if v == nil {
+			if ifMatch != "" {
+				return storage.ErrObjectNotFound
+			}
 			return nil // borrar lo que no existe no es un error en S3
 		}
 		var rec objectRecord
 		if err := json.Unmarshal(v, &rec); err != nil {
+			return err
+		}
+		if err := checkPrecondition(&rec, storage.Precondition{IfMatch: ifMatch}); err != nil {
 			return err
 		}
 		old = rec.Blob
@@ -721,11 +747,27 @@ func (b *Backend) ListUploads(_ context.Context, bucket string) ([]storage.Uploa
 	return out, err
 }
 
-func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, completed []storage.CompletedPart, wantChecksum string) (storage.Object, error) {
+func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, completed []storage.CompletedPart, wantChecksum string, cond storage.Precondition) (storage.Object, error) {
 	var upload storage.Upload
 	var have []partRecord
+	var done *objectRecord // el objeto, si esta misma subida ya se completó
 	err := b.db.View(func(tx *bolt.Tx) (err error) {
+		var current *objectRecord
+		if v := tx.Bucket(bktObjects).Get(objectKey(bucket, key)); v != nil {
+			current = new(objectRecord)
+			if err := json.Unmarshal(v, current); err != nil {
+				return err
+			}
+		}
 		if upload, err = getUpload(tx, bucket, key, id); err != nil {
+			if errors.Is(err, storage.ErrUploadNotFound) && current != nil && current.UploadID == id {
+				done, err = current, nil
+			}
+			return err
+		}
+		// Se evalúa aquí para no unir las partes en vano; la comprobación que
+		// vale es la de la transacción final.
+		if err := checkPrecondition(current, cond); err != nil {
 			return err
 		}
 		have, err = listParts(tx, id)
@@ -733,6 +775,10 @@ func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, co
 	})
 	if err != nil {
 		return storage.Object{}, err
+	}
+	if done != nil {
+		done.Key = key
+		return done.Object, nil
 	}
 	if len(completed) == 0 {
 		return storage.Object{}, storage.ErrInvalidPart
@@ -795,7 +841,7 @@ func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, co
 	}
 
 	rec := objectRecord{Object: storage.Object{
-		Key: key, Size: st.Size(), Modified: time.Now().UTC(), Metadata: upload.Metadata,
+		Key: key, Size: st.Size(), Modified: time.Now().UTC(), Metadata: upload.Metadata, UploadID: id,
 		ETag: hex.EncodeToString(etags.Sum(nil)) + "-" + strconv.Itoa(len(chosen)),
 	}}
 	if upload.ChecksumAlgo != "" {
@@ -825,7 +871,7 @@ func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, co
 		if _, err := getUpload(tx, bucket, key, id); err != nil {
 			return err
 		}
-		old, err := putObject(tx, bucket, key, rec)
+		old, err := putObject(tx, bucket, key, rec, cond)
 		if err != nil {
 			return err
 		}

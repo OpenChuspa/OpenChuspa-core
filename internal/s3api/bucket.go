@@ -12,16 +12,44 @@ import (
 	"github.com/OpenChuspa/OpenChuspa-core/internal/storage"
 )
 
-const maxListKeys = 1000
+const (
+	maxListKeys    = 1000
+	maxListBuckets = 10000
+)
 
 func (s *Server) listBuckets(r *request) *APIError {
-	buckets, err := s.Backend.ListBuckets(r.Context())
+	q := r.URL.Query()
+	limit := maxListBuckets
+	if v := q.Get("max-buckets"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxListBuckets {
+			return invalidArgument("max-buckets debe ser un entero entre 1 y 10000.")
+		}
+		limit = n
+	}
+	after := ""
+	if token := q.Get("continuation-token"); token != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(token)
+		if err != nil || !validBucketName(string(raw)) {
+			return invalidArgument("continuation-token inválido.")
+		}
+		after = string(raw)
+	}
+	buckets, err := s.Backend.ListBuckets(r.Context()) // ordenadas por nombre
 	if err != nil {
 		return storageError(err)
 	}
-	out := listBucketsResult{Owner: owner{ID: ownerID, DisplayName: ownerID}}
+	prefix := q.Get("prefix")
+	out := listBucketsResult{Owner: owner{ID: ownerID, DisplayName: ownerID}, Prefix: prefix}
 	for _, b := range buckets {
-		out.Buckets = append(out.Buckets, bucketEntry{Name: b.Name, CreationDate: b.Created.Format(timeFormat)})
+		if b.Name <= after || !strings.HasPrefix(b.Name, prefix) {
+			continue
+		}
+		if len(out.Buckets) == limit {
+			out.ContinuationToken = base64.RawURLEncoding.EncodeToString([]byte(out.Buckets[limit-1].Name))
+			break
+		}
+		out.Buckets = append(out.Buckets, bucketEntry{Name: b.Name, CreationDate: b.Created.Format(timeFormat), BucketRegion: s.Region})
 	}
 	writeXML(r.w, http.StatusOK, out)
 	return nil
@@ -31,7 +59,7 @@ func (s *Server) createBucket(r *request) *APIError {
 	// El cuerpo opcional (CreateBucketConfiguration) solo trae la región, que
 	// en un nodo único no cambia nada; se verifica su integridad y se descarta.
 	if r.ContentLength != 0 {
-		if _, apiErr := s.readXML(r); apiErr != nil {
+		if _, apiErr := s.readXML(r, true); apiErr != nil {
 			return apiErr
 		}
 	}
@@ -97,13 +125,17 @@ func parseListParams(q url.Values, maxParam string) (listParams, *APIError) {
 	return p, nil
 }
 
-func objectEntries(objects []storage.Object, encode func(string) string) []objectEntry {
+func objectEntries(objects []storage.Object, encode func(string) string, withOwner bool) []objectEntry {
 	out := make([]objectEntry, 0, len(objects))
 	for _, o := range objects {
-		out = append(out, objectEntry{
+		e := objectEntry{
 			Key: encode(o.Key), LastModified: o.Modified.Format(timeFormat),
 			ETag: quote(o.ETag), Size: o.Size, StorageClass: "STANDARD",
-		})
+		}
+		if withOwner {
+			e.Owner = &owner{ID: ownerID, DisplayName: ownerID}
+		}
+		out = append(out, e)
 	}
 	return out
 }
@@ -142,7 +174,7 @@ func (s *Server) listObjectsV2(r *request) *APIError {
 		StartAfter: p.encode(q.Get("start-after")), MaxKeys: p.in.MaxKeys, EncodingType: p.encoding,
 		KeyCount: len(res.Objects) + len(res.CommonPrefixes), IsTruncated: res.Truncated,
 		ContinuationToken: token,
-		Contents:          objectEntries(res.Objects, p.encode),
+		Contents:          objectEntries(res.Objects, p.encode, q.Get("fetch-owner") == "true"),
 		CommonPrefixes:    prefixEntries(res.CommonPrefixes, p.encode),
 	}
 	if res.Truncated {
@@ -172,11 +204,50 @@ func (s *Server) listObjectsV1(r *request) *APIError {
 	out := listObjectsV1Result{
 		Name: r.bucket, Prefix: p.encode(p.in.Prefix), Marker: p.encode(marker), Delimiter: p.encode(p.in.Delimiter),
 		MaxKeys: p.in.MaxKeys, EncodingType: p.encoding, IsTruncated: res.Truncated,
-		Contents:       objectEntries(res.Objects, p.encode),
+		Contents:       objectEntries(res.Objects, p.encode, true), // la v1 siempre trae el dueño
 		CommonPrefixes: prefixEntries(res.CommonPrefixes, p.encode),
 	}
 	if res.Truncated {
 		out.NextMarker = p.encode(res.Next)
+	}
+	writeXML(r.w, http.StatusOK, out)
+	return nil
+}
+
+// listObjectVersions responde como una chuspa sin versionado: cada objeto es
+// su única versión, con el identificador "null". Los clientes lo usan para
+// vaciar una chuspa sin saber si está versionada.
+func (s *Server) listObjectVersions(r *request) *APIError {
+	q := r.URL.Query()
+	p, apiErr := parseListParams(q, "max-keys")
+	if apiErr != nil {
+		return apiErr
+	}
+	marker := q.Get("key-marker")
+	p.in.After = marker
+	p.in.AfterPrefix = p.in.Delimiter != "" && strings.HasSuffix(marker, p.in.Delimiter) && strings.HasPrefix(marker, p.in.Prefix)
+
+	res, err := s.Backend.ListObjects(r.Context(), r.bucket, p.in)
+	if err != nil {
+		return storageError(err)
+	}
+	out := listVersionsResult{
+		Name: r.bucket, Prefix: p.encode(p.in.Prefix), KeyMarker: p.encode(marker), VersionIDMarker: q.Get("version-id-marker"),
+		Delimiter: p.encode(p.in.Delimiter), MaxKeys: p.in.MaxKeys, EncodingType: p.encoding, IsTruncated: res.Truncated,
+		CommonPrefixes: prefixEntries(res.CommonPrefixes, p.encode),
+	}
+	me := owner{ID: ownerID, DisplayName: ownerID}
+	for _, o := range res.Objects {
+		out.Versions = append(out.Versions, versionEntry{
+			Key: p.encode(o.Key), VersionID: nullVersion, IsLatest: true, LastModified: o.Modified.Format(timeFormat),
+			ETag: quote(o.ETag), Size: o.Size, Owner: me, StorageClass: "STANDARD",
+		})
+	}
+	if res.Truncated {
+		out.NextKeyMarker = p.encode(res.Next)
+		if !res.NextIsPrefix {
+			out.NextVersionIDMarker = nullVersion
+		}
 	}
 	writeXML(r.w, http.StatusOK, out)
 	return nil

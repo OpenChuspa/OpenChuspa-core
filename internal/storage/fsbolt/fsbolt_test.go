@@ -73,7 +73,7 @@ func TestBuckets(t *testing.T) {
 	if err := b.DeleteBucket(ctx, "feria-de-cali"); !errors.Is(err, storage.ErrBucketNotEmpty) {
 		t.Fatalf("se esperaba ErrBucketNotEmpty, se obtuvo %v", err)
 	}
-	if err := b.DeleteObject(ctx, "feria-de-cali", "a"); err != nil {
+	if err := b.DeleteObject(ctx, "feria-de-cali", "a", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.DeleteBucket(ctx, "feria-de-cali"); err != nil {
@@ -120,7 +120,7 @@ func TestOverwriteAndDeleteRemoveBlobs(t *testing.T) {
 	if n := countFiles(t, filepath.Join(dir, "blobs")); n != 1 {
 		t.Fatalf("tras sobrescribir quedan %d blobs", n)
 	}
-	b.DeleteObject(ctx, "chuspa", "k")
+	b.DeleteObject(ctx, "chuspa", "k", "")
 	if n := countFiles(t, filepath.Join(dir, "blobs")); n != 0 {
 		t.Fatalf("tras borrar quedan %d blobs", n)
 	}
@@ -272,22 +272,22 @@ func TestMultipart(t *testing.T) {
 	}
 
 	done := []storage.CompletedPart{{Number: 1, ETag: etags[0]}, {Number: 2, ETag: etags[1]}}
-	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{done[1], done[0]}, ""); !errors.Is(err, storage.ErrPartOrder) {
+	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{done[1], done[0]}, "", storage.Precondition{}); !errors.Is(err, storage.ErrPartOrder) {
 		t.Fatalf("orden: %v", err)
 	}
-	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{{Number: 1, ETag: "otro"}}, ""); !errors.Is(err, storage.ErrInvalidPart) {
+	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{{Number: 1, ETag: "otro"}}, "", storage.Precondition{}); !errors.Is(err, storage.ErrInvalidPart) {
 		t.Fatalf("etag: %v", err)
 	}
-	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{done[0], {Number: 3, ETag: "x"}}, ""); !errors.Is(err, storage.ErrInvalidPart) {
+	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, []storage.CompletedPart{done[0], {Number: 3, ETag: "x"}}, "", storage.Precondition{}); !errors.Is(err, storage.ErrInvalidPart) {
 		t.Fatalf("parte inexistente: %v", err)
 	}
 	b.PutPart(ctx, "chuspa", "grande", id, 3, mustStage(t, b, "x"), storage.PutInput{ETag: etags[1]})
 	small := []storage.CompletedPart{done[1], {Number: 3, ETag: etags[1]}}
-	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, small, ""); !errors.Is(err, storage.ErrPartTooSmall) {
+	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, small, "", storage.Precondition{}); !errors.Is(err, storage.ErrPartTooSmall) {
 		t.Fatalf("parte intermedia pequeña: %v", err)
 	}
 
-	obj, err := b.CompleteUpload(ctx, "chuspa", "grande", id, done, "")
+	obj, err := b.CompleteUpload(ctx, "chuspa", "grande", id, done, "", storage.Precondition{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,8 +300,12 @@ func TestMultipart(t *testing.T) {
 	if n := countFiles(t, filepath.Join(dir, "blobs")); n != 1 {
 		t.Fatalf("tras completar quedan %d blobs", n)
 	}
-	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", id, done, ""); !errors.Is(err, storage.ErrUploadNotFound) {
-		t.Fatalf("completar dos veces: %v", err)
+	// Reintentar la misma subida devuelve el mismo objeto; otra cualquiera no existe.
+	if again, err := b.CompleteUpload(ctx, "chuspa", "grande", id, done, "", storage.Precondition{}); err != nil || again.ETag != obj.ETag {
+		t.Fatalf("completar dos veces: %+v, %v", again, err)
+	}
+	if _, err := b.CompleteUpload(ctx, "chuspa", "grande", "no-existe", done, "", storage.Precondition{}); !errors.Is(err, storage.ErrUploadNotFound) {
+		t.Fatalf("subida inexistente: %v", err)
 	}
 
 	id2, _ := b.CreateUpload(ctx, storage.Upload{Bucket: "chuspa", Key: "abortada"})
@@ -384,5 +388,41 @@ func TestBackupAndReadOnly(t *testing.T) {
 	defer ro.Close()
 	if got := get(t, ro, "chuspa", "k"); got != "contenido" {
 		t.Fatalf("lectura desde la copia del índice: %q", got)
+	}
+}
+
+func TestPreconditions(t *testing.T) {
+	b := open(t, t.TempDir())
+	b.CreateBucket(ctx, "chuspa")
+	try := func(content string, cond storage.Precondition) error {
+		_, err := b.PutObject(ctx, "chuspa", "k", mustStage(t, b, content), storage.PutInput{ETag: "etag-" + content, Cond: cond})
+		return err
+	}
+	if err := try("a", storage.Precondition{IfMatch: "*"}); !errors.Is(err, storage.ErrObjectNotFound) {
+		t.Fatalf("If-Match sobre un objeto inexistente: %v", err)
+	}
+	if err := try("a", storage.Precondition{IfNoneMatch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := try("b", storage.Precondition{IfNoneMatch: true}); !errors.Is(err, storage.ErrPrecondition) {
+		t.Fatalf("If-None-Match sobre un objeto existente: %v", err)
+	}
+	if err := try("b", storage.Precondition{IfMatch: "otro"}); !errors.Is(err, storage.ErrPrecondition) {
+		t.Fatalf("If-Match con otro ETag: %v", err)
+	}
+	if got := get(t, b, "chuspa", "k"); got != "a" {
+		t.Fatalf("una escritura rechazada cambió el objeto: %q", got)
+	}
+	if err := try("b", storage.Precondition{IfMatch: "etag-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DeleteObject(ctx, "chuspa", "k", "etag-a"); !errors.Is(err, storage.ErrPrecondition) {
+		t.Fatalf("borrado con ETag viejo: %v", err)
+	}
+	if err := b.DeleteObject(ctx, "chuspa", "k", "etag-b"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countFiles(t, filepath.Join(b.dir, "blobs")) + countFiles(t, filepath.Join(b.dir, "staging")); n != 0 {
+		t.Fatalf("las escrituras rechazadas dejaron %d archivos", n)
 	}
 }

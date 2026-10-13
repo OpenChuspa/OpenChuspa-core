@@ -153,8 +153,8 @@ func TestNeverFakeSuccess(t *testing.T) {
 	call(t, "PUT", srv.URL+"/chuspa", "")
 	call(t, "PUT", srv.URL+"/chuspa/k", "x")
 	cases := []struct{ method, target string }{
-		{"GET", "/chuspa?versioning"}, {"PUT", "/chuspa?acl"}, {"GET", "/chuspa?versions"}, {"GET", "/chuspa?uploads&delimiter=/"},
-		{"POST", "/chuspa"}, {"PUT", "/chuspa/k?tagging"}, {"GET", "/chuspa/k?versionId=1"},
+		{"GET", "/chuspa?versioning"}, {"PUT", "/chuspa?acl"}, {"GET", "/chuspa?uploads&delimiter=/"},
+		{"POST", "/chuspa"}, {"PUT", "/chuspa/k?tagging"}, {"PUT", "/chuspa?versioning"},
 	}
 	for _, tc := range cases {
 		status, body, _ := call(t, tc.method, srv.URL+tc.target, "")
@@ -403,7 +403,7 @@ func TestDeleteObjects(t *testing.T) {
 	status, body, _ = call(t, "POST", srv.URL+"/chuspa?delete", payload, "X-Amz-Checksum-Crc32", crc32Of(payload))
 	if status != 200 || !strings.Contains(body, "<Deleted><Key>a</Key></Deleted>") ||
 		!strings.Contains(body, "<Deleted><Key>no-existe</Key></Deleted>") ||
-		!strings.Contains(body, "<Error><Key>b</Key><Code>NotImplemented</Code>") {
+		!strings.Contains(body, "<Error><Key>b</Key><Code>NoSuchVersion</Code>") {
 		t.Fatalf("borrado masivo: HTTP %d %s", status, body)
 	}
 	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/a", ""); status != 404 {
@@ -518,7 +518,9 @@ func TestUploadPartCopy(t *testing.T) {
 	target := srv.URL + "/chuspa/destino?uploadId=" + init.UploadId + "&partNumber="
 
 	status, body, _ := call(t, "PUT", target+"1", "", "X-Amz-Copy-Source", "/chuspa/origen", "X-Amz-Copy-Source-Range", "bytes=20-30")
-	wantStatus(t, "rango fuera del origen", status, body, 400, "InvalidArgument")
+	wantStatus(t, "rango fuera del origen", status, body, 416, "InvalidRange")
+	status, body, _ = call(t, "PUT", target+"1", "", "X-Amz-Copy-Source", "/chuspa/origen", "X-Amz-Copy-Source-Range", "bytes=5-")
+	wantStatus(t, "rango sin fin", status, body, 400, "InvalidArgument")
 
 	var etags []string
 	for i, rng := range []string{"bytes=6-9", "bytes=0-2"} {
@@ -541,5 +543,158 @@ func TestUploadPartCopy(t *testing.T) {
 	}
 	if _, body, _ := call(t, "GET", srv.URL+"/chuspa/destino", ""); body != "6789" {
 		t.Fatalf("contenido copiado por rango: %q", body)
+	}
+}
+
+// Sin versionado, cada objeto es su única versión "null".
+func TestUnversionedVersionsView(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	call(t, "PUT", srv.URL+"/chuspa/a", "x")
+	call(t, "PUT", srv.URL+"/chuspa/b", "x")
+
+	status, body, _ := call(t, "GET", srv.URL+"/chuspa?versions&max-keys=1", "")
+	if status != 200 || !strings.Contains(body, "<Key>a</Key><VersionId>null</VersionId><IsLatest>true</IsLatest>") ||
+		!strings.Contains(body, "<NextKeyMarker>a</NextKeyMarker>") || strings.Contains(body, "<Key>b</Key>") {
+		t.Fatalf("listado de versiones: HTTP %d %s", status, body)
+	}
+	_, body, _ = call(t, "GET", srv.URL+"/chuspa?versions&key-marker=a&version-id-marker=null", "")
+	if strings.Contains(body, "<Key>a</Key>") || !strings.Contains(body, "<Key>b</Key>") {
+		t.Fatalf("segunda página: %s", body)
+	}
+	if status, body, _ := call(t, "GET", srv.URL+"/chuspa/a?versionId=null", ""); status != 200 || body != "x" {
+		t.Fatalf("versión null: HTTP %d %q", status, body)
+	}
+	status, body, _ = call(t, "GET", srv.URL+"/chuspa/a?versionId=abc", "")
+	wantStatus(t, "versión inexistente", status, body, 404, "NoSuchVersion")
+	status, body, _ = call(t, "DELETE", srv.URL+"/chuspa/a?versionId=abc", "")
+	wantStatus(t, "borrar versión inexistente", status, body, 404, "NoSuchVersion")
+	if status, _, _ := call(t, "DELETE", srv.URL+"/chuspa/a?versionId=null", ""); status != 204 {
+		t.Fatalf("borrar versión null: HTTP %d", status)
+	}
+}
+
+func TestConditionalWrites(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+
+	status, body, _ := call(t, "PUT", srv.URL+"/chuspa/k", "uno", "If-Match", `"cualquiera"`)
+	wantStatus(t, "If-Match sin objeto", status, body, 404, "NoSuchKey")
+	status, _, h := call(t, "PUT", srv.URL+"/chuspa/k", "uno", "If-None-Match", "*")
+	if status != 200 {
+		t.Fatalf("crear si no existe: HTTP %d", status)
+	}
+	etag := h.Get("ETag")
+	status, body, _ = call(t, "PUT", srv.URL+"/chuspa/k", "dos", "If-None-Match", "*")
+	wantStatus(t, "crear sobre uno existente", status, body, 412, "PreconditionFailed")
+	status, body, _ = call(t, "PUT", srv.URL+"/chuspa/k", "dos", "If-Match", `"otro"`)
+	wantStatus(t, "reemplazar otra versión", status, body, 412, "PreconditionFailed")
+	if _, body, _ := call(t, "GET", srv.URL+"/chuspa/k", ""); body != "uno" {
+		t.Fatalf("una escritura rechazada cambió el objeto: %q", body)
+	}
+	if status, _, _ := call(t, "PUT", srv.URL+"/chuspa/k", "dos", "If-Match", etag); status != 200 {
+		t.Fatalf("reemplazar la versión esperada: HTTP %d", status)
+	}
+
+	status, body, _ = call(t, "DELETE", srv.URL+"/chuspa/k", "", "If-Match", etag)
+	wantStatus(t, "borrar con ETag viejo", status, body, 412, "PreconditionFailed")
+	status, body, _ = call(t, "DELETE", srv.URL+"/chuspa/k", "", "X-Amz-If-Match-Size", "3")
+	wantStatus(t, "condición por tamaño", status, body, 501, "NotImplemented")
+	if status, _, _ := call(t, "HEAD", srv.URL+"/chuspa/k", ""); status != 200 {
+		t.Fatalf("un borrado rechazado borró el objeto: HTTP %d", status)
+	}
+}
+
+func TestGetConditionsAndOverrides(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	call(t, "PUT", srv.URL+"/chuspa/k", "x", "Expires", "Thu, 01 Dec 2033 16:00:00 GMT", "Content-Encoding", "deflate, gzip")
+	past, future := "Sat, 01 Jan 2000 00:00:00 GMT", "Fri, 01 Jan 2100 00:00:00 GMT"
+
+	if status, _, _ := call(t, "GET", srv.URL+"/chuspa/k", "", "If-Modified-Since", future); status != 304 {
+		t.Errorf("If-Modified-Since futuro: HTTP %d", status)
+	}
+	if status, _, _ := call(t, "GET", srv.URL+"/chuspa/k", "", "If-Modified-Since", past); status != 200 {
+		t.Errorf("If-Modified-Since pasado: HTTP %d", status)
+	}
+	status, body, _ := call(t, "GET", srv.URL+"/chuspa/k", "", "If-Unmodified-Since", past)
+	wantStatus(t, "If-Unmodified-Since pasado", status, body, 412, "PreconditionFailed")
+
+	_, _, h := call(t, "GET", srv.URL+"/chuspa/k?response-content-type=foo/bar&response-content-disposition=attachment", "")
+	if h.Get("Content-Type") != "foo/bar" || h.Get("Content-Disposition") != "attachment" ||
+		h.Get("Expires") != "Thu, 01 Dec 2033 16:00:00 GMT" || h.Get("Content-Encoding") != "deflate, gzip" {
+		t.Errorf("headers de respuesta: %v", h)
+	}
+	status, body, _ = call(t, "GET", srv.URL+"/chuspa/k?partNumber=1", "")
+	wantStatus(t, "lectura por parte", status, body, 501, "NotImplemented")
+}
+
+// En CompleteMultipartUpload, x-amz-checksum-* es el checksum del objeto.
+func TestCompositeChecksumAndIdempotentComplete(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	_, body, _ := call(t, "POST", srv.URL+"/chuspa/k?uploads", "", "X-Amz-Checksum-Algorithm", "SHA256")
+	var init struct{ UploadId string }
+	xml.Unmarshal([]byte(body), &init)
+	content := strings.Repeat("A", 1024)
+	_, _, h := call(t, "PUT", srv.URL+"/chuspa/k?partNumber=1&uploadId="+init.UploadId, content,
+		"X-Amz-Checksum-Sha256", "arcu6553sHVAiX4MjW0j7I7vD4w6R+Gz9Ok0Q9lTa+0=")
+	complete := "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + h.Get("ETag") + "</ETag></Part></CompleteMultipartUpload>"
+	target := srv.URL + "/chuspa/k?uploadId=" + init.UploadId
+
+	status, body, _ := call(t, "POST", target, complete, "X-Amz-Checksum-Sha256", "bad")
+	wantStatus(t, "checksum compuesto incorrecto", status, body, 400, "BadDigest")
+	// Valor conocido de ceph/s3-tests para este contenido.
+	const composite = "Ok6Cs5b96ux6+MWQkJO7UBT5sKPBeXBLwvj/hK89smg=-1"
+	status, first, _ := call(t, "POST", target, complete, "X-Amz-Checksum-Sha256", composite)
+	if status != 200 || !strings.Contains(first, "<ChecksumSHA256>"+composite+"</ChecksumSHA256>") {
+		t.Fatalf("completar: HTTP %d %s", status, first)
+	}
+	status, again, _ := call(t, "POST", target, complete, "X-Amz-Checksum-Sha256", composite)
+	if status != 200 || again != first {
+		t.Fatalf("reintento de completar: HTTP %d %s", status, again)
+	}
+	status, body, _ = call(t, "POST", srv.URL+"/chuspa/k?uploadId=no-existe", complete)
+	wantStatus(t, "subida inexistente", status, body, 404, "NoSuchUpload")
+}
+
+func TestListBucketsPagination(t *testing.T) {
+	srv := newServer(t, false)
+	for _, name := range []string{"chuspa-c", "chuspa-a", "chuspa-b", "otra"} {
+		call(t, "PUT", srv.URL+"/"+name, "")
+	}
+	var seen []string
+	token := ""
+	for i := 0; i < 5; i++ {
+		_, body, _ := call(t, "GET", srv.URL+"/?max-buckets=1&prefix=chuspa-&continuation-token="+token, "")
+		var res struct {
+			Buckets           []struct{ Name string } `xml:"Buckets>Bucket"`
+			ContinuationToken string
+		}
+		if err := xml.Unmarshal([]byte(body), &res); err != nil {
+			t.Fatal(err, body)
+		}
+		for _, b := range res.Buckets {
+			seen = append(seen, b.Name)
+		}
+		if token = res.ContinuationToken; token == "" {
+			break
+		}
+	}
+	if got := strings.Join(seen, " "); got != "chuspa-a chuspa-b chuspa-c" {
+		t.Fatalf("chuspas paginadas: %q", got)
+	}
+}
+
+func TestUnknownLengthUpload(t *testing.T) {
+	srv := newServer(t, false)
+	call(t, "PUT", srv.URL+"/chuspa", "")
+	// io.MultiReader oculta el tamaño: net/http usa Transfer-Encoding: chunked.
+	req, _ := http.NewRequest("PUT", srv.URL+"/chuspa/k", io.MultiReader(strings.NewReader("sin "), strings.NewReader("tamaño")))
+	if status, body, _ := do(t, req); status != 200 {
+		t.Fatalf("subida sin Content-Length: HTTP %d %s", status, body)
+	}
+	if _, body, _ := call(t, "GET", srv.URL+"/chuspa/k", ""); body != "sin tamaño" {
+		t.Fatalf("contenido: %q", body)
 	}
 }

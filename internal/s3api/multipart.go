@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -122,12 +123,18 @@ func (s *Server) uploadPartCopy(r *request) *APIError {
 
 	start, length := int64(0), obj.Size
 	if h := r.Header.Get("X-Amz-Copy-Source-Range"); h != "" {
-		var ok, satisfiable bool
-		start, length, ok, satisfiable = parseRange(h, obj.Size)
-		// A diferencia de GetObject, aquí un rango inválido es un error.
-		if !ok || !satisfiable || strings.HasPrefix(h, "bytes=-") || strings.HasSuffix(h, "-") {
-			return invalidArgument("x-amz-copy-source-range debe tener la forma bytes=inicio-fin dentro del objeto.")
+		// A diferencia de GetObject, aquí el rango debe ser exacto: inicio y
+		// fin presentes y dentro del objeto.
+		first, last, _ := strings.Cut(strings.TrimPrefix(h, "bytes="), "-")
+		a, errA := parseOffset(first)
+		b, errB := parseOffset(last)
+		if !strings.HasPrefix(h, "bytes=") || errA != nil || errB != nil || a > b {
+			return invalidArgument("x-amz-copy-source-range debe tener la forma bytes=inicio-fin.")
 		}
+		if b >= obj.Size {
+			return ErrInvalidRange
+		}
+		start, length = a, b-a+1
 	}
 	if _, err := content.Seek(start, io.SeekStart); err != nil {
 		return storageError(err)
@@ -157,11 +164,18 @@ func (s *Server) uploadPartCopy(r *request) *APIError {
 
 func (s *Server) completeUpload(r *request) *APIError {
 	uploadID := r.URL.Query().Get("uploadId")
+	// Si la subida ya no existe puede ser un reintento de una que ya se
+	// completó: eso lo resuelve el almacenamiento.
 	upload, err := s.Backend.GetUpload(r.Context(), r.bucket, r.key, uploadID)
-	if err != nil {
+	if err != nil && !errors.Is(err, storage.ErrUploadNotFound) {
 		return storageError(err)
 	}
-	data, apiErr := s.readXML(r)
+	cond, apiErr := writePrecondition(r.Header)
+	if apiErr != nil {
+		return apiErr
+	}
+	// Aquí x-amz-checksum-* describe el objeto final, no este XML.
+	data, apiErr := s.readXML(r, false)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -178,7 +192,7 @@ func (s *Server) completeUpload(r *request) *APIError {
 		want = r.Header.Get(checksum.HeaderPrefix + upload.ChecksumAlgo)
 	}
 
-	obj, err := s.Backend.CompleteUpload(r.Context(), r.bucket, r.key, uploadID, parts, want)
+	obj, err := s.Backend.CompleteUpload(r.Context(), r.bucket, r.key, uploadID, parts, want, cond)
 	if err != nil {
 		return storageError(err)
 	}
