@@ -1,0 +1,36 @@
+# Despliegue local de un nodo. Antes de arrancar:
+#
+#   mkdir -p secrets && openssl rand -hex 24 > secrets/chuspa_root_password
+#   chmod 600 secrets/chuspa_root_password
+#   echo "CHUSPA_ROOT_USER=mi-llave" > .env
+#   docker compose up -d --build
+#
+# Todavía no hay imagen publicada: se construye desde este repositorio. Cuando
+# exista el primer release, reemplace "build" por la imagen con su versión
+# exacta (nunca latest).
+services:
+  chuspa:
+    build: .
+    ports:
+      # Solo en loopback: exponerlo es una decisión de quien despliega, y
+      # exige un proxy con TLS delante.
+      - "127.0.0.1:9000:9000"
+    environment:
+      CHUSPA_ROOT_USER: "${CHUSPA_ROOT_USER:?definila en .env}"
+      CHUSPA_ROOT_PASSWORD_FILE: /run/secrets/chuspa_root_password
+      CHUSPA_REGION: "cali-san-antonio-1"
+    secrets:
+      - chuspa_root_password
+    volumes:
+      - chuspa_data:/data
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+secrets:
+  chuspa_root_password:
+    file: ./secrets/chuspa_root_password
+
+volumes:
+  chuspa_data:
