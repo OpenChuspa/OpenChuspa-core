@@ -6,7 +6,7 @@ El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decis
 
 ## Estado
 
-Proyecto en construcción, versión `0.x`: todavía no hay releases ni imagen publicada, y no ha pasado una auditoría de seguridad externa. No lo use para datos que no pueda perder.
+Versión `0.3.0`, la primera que cierra el MVP: un nodo, con datos versionados y reconstruibles, verificación de contenido, TLS nativo y probado en cada cambio contra los SDK de AWS, `ceph/s3-tests` y una prueba de resistencia con `kill -9`. La imagen está en Docker Hub (`openchuspa/chuspa`) y en `ghcr.io/openchuspa/chuspa`, firmada con cosign. Todavía no ha pasado una auditoría de seguridad externa: mantenga copias de lo que no pueda perder, como con cualquier almacenamiento de un solo nodo.
 
 Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en CI, en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
 
@@ -59,14 +59,14 @@ El direccionamiento es por ruta (`/chuspa/key`). El estilo de host virtual (`chu
 
 ### Con Docker
 
-Todavía no hay imagen publicada; se construye desde el repositorio:
-
 ```bash
 mkdir -p secrets && openssl rand -hex 24 > secrets/chuspa_root_password
 chmod 600 secrets/chuspa_root_password
 echo "CHUSPA_ROOT_USER=mi-llave" > .env
-docker compose up -d --build
+docker compose up -d
 ```
+
+El `docker-compose.yml` usa la imagen publicada con su versión exacta. Para construirla desde el código: `docker build -t chuspa:local .`.
 
 La imagen es distroless: sin shell, sin root, con el sistema de archivos de solo lectura y sin capabilities. El puerto se publica solo en loopback.
 

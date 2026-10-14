@@ -34,7 +34,7 @@ Fuera del alcance en esta etapa, porque son límites conocidos y documentados:
 
 - un atacante con acceso de escritura al volumen de datos;
 - la falta de cifrado en reposo (planeado para la fase 3);
-- exponer el servidor a internet sin un proxy con TLS delante.
+- exponer el servidor fuera de loopback sin TLS, propio (`CHUSPA_TLS_CERT_FILE`) o de un proxy.
 
 ## Verificar lo que ejecuta
 
