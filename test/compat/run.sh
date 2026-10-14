@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prueba de compatibilidad con clientes reales: compila el motor, lo arranca
 # en un directorio temporal y ejecuta los criterios de aceptación del MVP
-# (MVP-ENGINE-v2.md, sección 11) con el AWS CLI, curl y los SDK de Python,
+# (docs/historial/MVP-ENGINE-v2.md, sección 11) con el AWS CLI, curl y los SDK de Python,
 # JavaScript y Go.
 #
 # Uso: test/compat/run.sh

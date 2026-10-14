@@ -2,7 +2,7 @@
 
 El **motor caleño**: un servidor de almacenamiento de objetos de un solo nodo, compatible con la API de AWS S3, escrito en Go. Abierto por diseño y seguro por defecto.
 
-El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decisiones que se apartan de él quedan en [`docs/adr/`](./docs/adr).
+Las decisiones de diseño vigentes quedan en [`docs/adr/`](./docs/adr); los documentos con los que se diseñó el motor están en [`docs/historial/`](./docs/historial).
 
 ## Estado
 
