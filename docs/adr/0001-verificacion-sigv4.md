@@ -2,7 +2,7 @@
 
 - **Estado:** aceptada
 - **Fecha:** 2026-10-13
-- **Reemplaza:** la fila 6 de la sección 0 y el paso 4 de la sección 7.3 de `MVP-ENGINE-v2.md`
+- **Reemplaza:** la fila 6 de la sección 0 y el paso 4 de la sección 7.3 de `docs/historial/MVP-ENGINE-v2.md`
 
 ## Contexto
 
