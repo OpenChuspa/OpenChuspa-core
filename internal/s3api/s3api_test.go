@@ -698,3 +698,52 @@ func TestUnknownLengthUpload(t *testing.T) {
 		t.Fatalf("contenido: %q", body)
 	}
 }
+
+func TestLimitadorDeFuerzaBruta(t *testing.T) {
+	backend, _, err := fsbolt.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	limiter := NewAuthLimiter()
+	limiter.MaxFailures = 3
+	limiter.Now = func() time.Time { return now }
+	api := &Server{
+		Backend: backend, Region: testRegion, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verifier: &auth.Verifier{AccessKey: testKey, SecretKey: testSecret, Region: testRegion},
+		Limiter:  limiter,
+	}
+	srv := httptest.NewServer(api)
+	t.Cleanup(func() { srv.Close(); backend.Close() })
+
+	const empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	good := func() *http.Request { return signedRequest(t, "GET", srv.URL+"/", nil, empty, time.Now()) }
+	bad := func() *http.Request {
+		r := good()
+		r.Header.Set("Authorization", strings.Replace(r.Header.Get("Authorization"), "Signature=", "Signature=0", 1))
+		return r
+	}
+
+	if status, body, _ := do(t, good()); status != 200 {
+		t.Fatalf("petición válida: %d %s", status, body)
+	}
+	for i := 0; i < 3; i++ {
+		status, body, _ := do(t, bad())
+		wantStatus(t, "firma mala", status, body, 403, "SignatureDoesNotMatch")
+	}
+	// Bloqueada: ni siquiera la llave correcta pasa.
+	status, body, _ := do(t, good())
+	wantStatus(t, "durante el bloqueo", status, body, 503, "SlowDown")
+	// Un reloj desfasado no cuenta como intento de adivinar la llave.
+	now = now.Add(limiter.Block + time.Second)
+	if status, body, _ := do(t, good()); status != 200 {
+		t.Fatalf("tras el bloqueo: %d %s", status, body)
+	}
+	for i := 0; i < 5; i++ {
+		status, body, _ := do(t, signedRequest(t, "GET", srv.URL+"/", nil, empty, time.Now().Add(-time.Hour)))
+		wantStatus(t, "reloj desfasado", status, body, 403, "RequestTimeTooSkewed")
+	}
+	if status, body, _ := do(t, good()); status != 200 {
+		t.Fatalf("el desfase de reloj bloqueó al cliente: %d %s", status, body)
+	}
+}

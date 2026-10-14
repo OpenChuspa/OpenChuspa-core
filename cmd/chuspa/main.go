@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -97,19 +98,35 @@ func serve() error {
 
 	api := &s3api.Server{Backend: backend, Region: cfg.Region, Log: log}
 	if cfg.RootUser != "" {
-		api.Verifier = &auth.Verifier{AccessKey: cfg.RootUser, SecretKey: cfg.RootPassword, Region: cfg.Region}
+		api.Verifier = &auth.Verifier{AccessKey: cfg.RootUser, SecretKey: cfg.RootPassword,
+			PreviousSecretKey: cfg.PreviousRootPassword, Region: cfg.Region}
+		if cfg.AuthMaxFailures > 0 {
+			api.Limiter = s3api.NewAuthLimiter()
+			api.Limiter.MaxFailures = cfg.AuthMaxFailures
+		}
+		if cfg.PreviousRootPassword != "" {
+			log.Warn("rotación en curso: se acepta también el secreto anterior; quite CHUSPA_ROOT_PASSWORD_PREVIOUS cuando todos los clientes usen el nuevo")
+		}
 	}
 	if cfg.AllowAnonymous {
 		api.Verifier = nil
 		log.Warn("MODO ANÓNIMO: el servidor acepta peticiones sin autenticación; solo para pruebas locales")
 	}
-	if !cfg.Loopback() {
-		log.Warn("el servidor escucha fuera de loopback sin TLS propio: póngale delante un proxy con TLS", "addr", cfg.Addr)
+	if !cfg.Loopback() && cfg.TLSCertFile == "" {
+		log.Warn("el servidor escucha fuera de loopback sin TLS: configure CHUSPA_TLS_CERT_FILE y CHUSPA_TLS_KEY_FILE o póngale delante un proxy con TLS", "addr", cfg.Addr)
 	}
 
-	listener, err := net.Listen("tcp", cfg.Addr)
+	tcp, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return err
+	}
+	listener := httpx.LimitListener(tcp, httpx.MaxConnections)
+	if cfg.TLSCertFile != "" {
+		certs, err := httpx.NewCertReloader(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return err
+		}
+		listener = tls.NewListener(listener, certs.TLSConfig())
 	}
 	srv := httpx.NewServer(httpx.Wrap(api, log, func(w http.ResponseWriter, r *http.Request) {
 		s3api.WriteError(w, r, s3api.ErrInternal)
@@ -118,9 +135,9 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	failed := make(chan error, 1)
-	go func() { failed <- srv.Serve(httpx.LimitListener(listener, httpx.MaxConnections)) }()
+	go func() { failed <- srv.Serve(listener) }()
 	log.Info("OpenChuspa escuchando", "addr", listener.Addr().String(), "region", cfg.Region,
-		"data_dir", cfg.DataDir, "version", version, "anonymous", api.Verifier == nil)
+		"data_dir", cfg.DataDir, "version", version, "anonymous", api.Verifier == nil, "tls", cfg.TLSCertFile != "")
 
 	go janitor(ctx, backend, cfg.MultipartExpiry, log)
 	if cfg.ScrubInterval > 0 {
@@ -155,8 +172,14 @@ func healthcheck() error {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + s3api.HealthPath)
+	scheme, client := "http", &http.Client{Timeout: 3 * time.Second}
+	if os.Getenv("CHUSPA_TLS_CERT_FILE") != "" {
+		// Solo comprueba que el proceso local responde: la identidad del
+		// certificado no importa aquí y puede no cubrir 127.0.0.1.
+		scheme = "https"
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // conexión local de salud
+	}
+	resp, err := client.Get(scheme + "://" + net.JoinHostPort(host, port) + s3api.HealthPath)
 	if err != nil {
 		return err
 	}

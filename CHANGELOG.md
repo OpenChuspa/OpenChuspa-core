@@ -10,6 +10,9 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 - Metadatos junto a cada blob y una marca por chuspa: `chuspa rebuild-index` reconstruye el índice sin borrar nada.
 - SHA-256 de cada objeto calculado por el servidor, `chuspa verify` y verificación periódica del contenido (`CHUSPA_SCRUB_INTERVAL`).
 - Espacio libre mínimo en disco (`CHUSPA_MIN_FREE_MB`): por debajo, las escrituras responden `507 InsufficientStorage`.
+- TLS nativo (`CHUSPA_TLS_CERT_FILE`, `CHUSPA_TLS_KEY_FILE`), mínimo TLS 1.2, con recarga del certificado sin reiniciar.
+- Rotación del secreto sin corte (`CHUSPA_ROOT_PASSWORD_PREVIOUS`).
+- Bloqueo por fuerza bruta: 20 autenticaciones fallidas por minuto bloquean la IP 5 minutos (`CHUSPA_AUTH_MAX_FAILURES`).
 
 ## [0.2.0] - 2026-10-13
 

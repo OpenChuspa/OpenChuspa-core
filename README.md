@@ -108,6 +108,9 @@ export AWS_ACCESS_KEY_ID=mi-llave AWS_SECRET_ACCESS_KEY="$SECRETO"
 | `CHUSPA_ROOT_USER` | *(obligatoria)* | Access key: de 3 a 128 letras, dígitos, `-` o `_`. |
 | `CHUSPA_ROOT_PASSWORD` | *(obligatoria)* | Secret key, mínimo 32 caracteres. |
 | `CHUSPA_ROOT_PASSWORD_FILE` | *(vacío)* | Ruta a un archivo con el secreto; alternativa a la anterior. |
+| `CHUSPA_ROOT_PASSWORD_PREVIOUS` (o `_FILE`) | *(vacío)* | Secreto anterior, aceptado además del actual mientras se rota. |
+| `CHUSPA_TLS_CERT_FILE` / `CHUSPA_TLS_KEY_FILE` | *(vacío)* | Certificado y llave PEM para TLS nativo (1.2 o superior). Se releen al cambiar en disco. |
+| `CHUSPA_AUTH_MAX_FAILURES` | `20` | Autenticaciones fallidas por minuto que bloquean una IP durante 5 minutos (`503 SlowDown`). `0` lo desactiva. |
 | `CHUSPA_REGION` | `cali-san-antonio-1` | Región que reporta el servidor y que exige en la firma. |
 | `CHUSPA_ALLOW_ANONYMOUS` | `false` | Sin autenticación. Solo se acepta escuchando en loopback. |
 | `CHUSPA_LOG_FORMAT` | `json` | `json` o `text`. |
@@ -117,7 +120,9 @@ export AWS_ACCESS_KEY_ID=mi-llave AWS_SECRET_ACCESS_KEY="$SECRETO"
 
 El servidor **no arranca** sin credenciales, con un secreto corto, en modo anónimo fuera de loopback, ni con las credenciales de ejemplo de la documentación fuera de loopback.
 
-No hay TLS propio todavía: fuera de loopback necesita un proxy con TLS delante, y el servidor lo avisa en el log.
+Fuera de loopback, el servidor necesita TLS: el propio (`CHUSPA_TLS_CERT_FILE` y `CHUSPA_TLS_KEY_FILE`) o un proxy con TLS delante. Sin ninguno de los dos lo avisa en el log. Detrás de un proxy, el bloqueo por fuerza bruta ve la IP del proxy: un ataque bloquea a todos durante 5 minutos, lo que se prefiere a dejar probar llaves sin límite.
+
+**Rotar el secreto sin cortar el servicio:** se pone el nuevo en `CHUSPA_ROOT_PASSWORD`, el actual en `CHUSPA_ROOT_PASSWORD_PREVIOUS` y se reinicia; se cambian los clientes; se quita `CHUSPA_ROOT_PASSWORD_PREVIOUS` y se reinicia otra vez.
 
 ## Cómo guarda los datos
 
@@ -207,4 +212,4 @@ La suite de compatibilidad genera credenciales aleatorias en cada ejecución y a
 
 ## Pendiente
 
-- Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, TLS nativo, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.
+- Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.

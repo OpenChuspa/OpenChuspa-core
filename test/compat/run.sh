@@ -291,8 +291,33 @@ expect_error InsufficientStorage s3 s3api put-object --bucket "$BUCKET" --key ll
 stop_server TERM
 unset CHUSPA_MIN_FREE_MB
 
+step "TLS nativo, rotación del secreto y bloqueo por fuerza bruta"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj /CN=localhost \
+  -addext "subjectAltName=IP:127.0.0.1" -keyout "$WORK/tls.key" -out "$WORK/tls.crt" 2>/dev/null
+NEW_SECRET="$(openssl rand -hex 24)"
+CHUSPA_ADDR="127.0.0.1:$PORT" CHUSPA_DATA_DIR="$WORK/data" CHUSPA_ROOT_USER=$ACCESS_KEY \
+CHUSPA_ROOT_PASSWORD=$NEW_SECRET CHUSPA_ROOT_PASSWORD_PREVIOUS=$SECRET_KEY \
+CHUSPA_TLS_CERT_FILE="$WORK/tls.crt" CHUSPA_TLS_KEY_FILE="$WORK/tls.key" \
+  "$WORK/chuspa" serve >>"$WORK/server.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+  CHUSPA_ADDR="127.0.0.1:$PORT" CHUSPA_TLS_CERT_FILE="$WORK/tls.crt" "$WORK/chuspa" healthcheck 2>/dev/null && break
+  sleep 0.1
+done
+tls() { aws --endpoint-url "https://127.0.0.1:$PORT" --ca-bundle "$WORK/tls.crt" "$@"; }
+tls s3 ls >/dev/null || fail "el secreto anterior no funcionó durante la rotación"
+AWS_SECRET_ACCESS_KEY=$NEW_SECRET tls s3 ls >/dev/null || fail "el secreto nuevo no funcionó"
+if curl -sf "http://127.0.0.1:$PORT/" >/dev/null; then fail "el puerto TLS respondió en HTTP plano"; fi
+for _ in $(seq 1 20); do
+  curl -s -o /dev/null --cacert "$WORK/tls.crt" --aws-sigv4 "aws:amz:cali-san-antonio-1:s3" \
+    --user "$ACCESS_KEY:llave-equivocada-de-un-atacante" "https://127.0.0.1:$PORT/"
+done
+expect_error SlowDown env AWS_SECRET_ACCESS_KEY="$NEW_SECRET" aws --endpoint-url "https://127.0.0.1:$PORT" --ca-bundle "$WORK/tls.crt" s3api list-buckets
+grep -q "demasiadas autenticaciones fallidas" "$WORK/server.log" || fail "el bloqueo no quedó en el log"
+stop_server TERM
+
 step "sin secretos en los logs"
-if grep -qe "$SECRET_KEY" -e 'Signature=' -e 'AWS4-HMAC-SHA256' "$WORK/server.log"; then
+if grep -qe "$SECRET_KEY" -e "$NEW_SECRET" -e 'Signature=' -e 'AWS4-HMAC-SHA256' "$WORK/server.log"; then
   fail "el log del servidor contiene material de autenticación"
 fi
 
