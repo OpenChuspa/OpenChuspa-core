@@ -192,6 +192,5 @@ La suite de compatibilidad genera credenciales aleatorias en cada ejecución y a
 
 ## Pendiente
 
-- Primer release `0.1.0`: el workflow de release (imagen multi-arquitectura firmada con cosign, SBOM, provenance y binarios con sumas firmadas) está escrito y nunca se ha ejecutado.
 - Reconstruir el índice a partir de los blobs: hoy la recuperación es la copia diaria `meta.db.bak`.
 - Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, TLS nativo, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.

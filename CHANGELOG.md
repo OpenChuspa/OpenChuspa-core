@@ -4,6 +4,8 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 
 ## [Sin publicar]
 
+## [0.1.0] - 2026-10-13
+
 ### Añadido
 
 - Servidor S3 de un solo nodo: chuspas, objetos con `Range`, listados v1 y v2, multipart, copias y borrado masivo.
