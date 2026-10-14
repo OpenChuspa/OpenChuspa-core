@@ -47,6 +47,7 @@ var (
 	ErrPreconditionFailed    = &APIError{"PreconditionFailed", "No se cumplió una de las condiciones de la petición.", http.StatusPreconditionFailed}
 	ErrRequestTimeout        = &APIError{"RequestTimeout", "La conexión estuvo demasiado tiempo sin enviar datos.", http.StatusBadRequest}
 	ErrInternal              = &APIError{"InternalError", "Error interno del servidor.", http.StatusInternalServerError}
+	ErrInsufficientStorage   = &APIError{"InsufficientStorage", "El servidor no tiene espacio libre suficiente para guardar el contenido.", http.StatusInsufficientStorage}
 )
 
 func invalidArgument(msg string) *APIError {

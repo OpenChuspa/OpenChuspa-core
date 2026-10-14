@@ -49,11 +49,13 @@ func get(t *testing.T, b *Backend, bucket, key string) string {
 	return string(data)
 }
 
+// countFiles cuenta los archivos de contenido; los metadatos que acompañan a
+// cada blob no cuentan.
 func countFiles(t *testing.T, dir string) int {
 	t.Helper()
 	n := 0
 	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
+		if err == nil && !d.IsDir() && !strings.HasSuffix(d.Name(), sidecarSuffix) {
 			n++
 		}
 		return nil

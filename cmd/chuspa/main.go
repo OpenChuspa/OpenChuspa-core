@@ -30,9 +30,13 @@ Uso:
   chuspa healthcheck                      consulta la salud del servidor local (para contenedores)
   chuspa inspect [chuspa [prefijo]]       lista chuspas u objetos leyendo el índice
   chuspa export <chuspa> <key> <archivo>  copia el contenido de un objeto a un archivo
+  chuspa verify                           relee todo el contenido y lo compara con su hash
+  chuspa rebuild-index                    reconstruye el índice desde los blobs y sus metadatos
   chuspa version                          muestra la versión
 
-inspect y export leen CHUSPA_DATA_DIR directamente y necesitan el servidor detenido.
+inspect, export, verify y rebuild-index leen CHUSPA_DATA_DIR directamente y
+necesitan el servidor detenido. rebuild-index no borra nada: renombra el índice
+anterior y aparta en recuperados/ lo que no pueda asignar a un objeto.
 
 La configuración se lee de variables de entorno CHUSPA_*; ver README.md.
 `
@@ -52,6 +56,10 @@ func main() {
 		err = inspect(os.Args[2:])
 	case "export":
 		err = export(os.Args[2:])
+	case "verify":
+		err = verifyCmd(os.Args[2:])
+	case "rebuild-index":
+		err = rebuildIndex(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -82,6 +90,7 @@ func serve() error {
 		return err
 	}
 	defer backend.Close()
+	backend.MinFreeBytes = cfg.MinFreeBytes
 	if orphans > 0 {
 		log.Info("se limpiaron restos de una ejecución anterior", "archivos", orphans)
 	}
@@ -114,6 +123,9 @@ func serve() error {
 		"data_dir", cfg.DataDir, "version", version, "anonymous", api.Verifier == nil)
 
 	go janitor(ctx, backend, cfg.MultipartExpiry, log)
+	if cfg.ScrubInterval > 0 {
+		go scrubber(ctx, backend, cfg.ScrubInterval, log)
+	}
 
 	select {
 	case err := <-failed:
@@ -190,6 +202,33 @@ func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Durati
 					lastBackup = now
 				}
 			}
+		}
+	}
+}
+
+// scrubber relee todo el contenido cada interval y registra como error cada
+// objeto que no coincide con su hash: es la forma de enterarse de un disco que
+// se está dañando antes de que alguien lea el objeto.
+func scrubber(ctx context.Context, backend *fsbolt.Backend, interval time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			start := time.Now()
+			problems := 0
+			res, err := backend.Verify(ctx, func(p fsbolt.Problem) {
+				problems++
+				log.Error("objeto dañado", "chuspa", p.Bucket, "key", p.Key, "blob", p.Blob, "motivo", p.Reason)
+			})
+			if err != nil && ctx.Err() == nil {
+				log.Error("falló la verificación del contenido", "error", err.Error())
+				continue
+			}
+			log.Info("verificación del contenido", "objetos", res.Objects, "bytes", res.Bytes,
+				"dañados", problems, "duracion", time.Since(start).Round(time.Second).String())
 		}
 	}
 }

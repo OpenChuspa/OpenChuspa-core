@@ -31,6 +31,8 @@ func TestLoad(t *testing.T) {
 		{"usuario con barra", map[string]string{"CHUSPA_ROOT_USER": "a/b", "CHUSPA_ROOT_PASSWORD": goodSecret}, "CHUSPA_ROOT_USER inválido"},
 		{"dirección inválida", map[string]string{"CHUSPA_ADDR": "9000"}, "CHUSPA_ADDR inválida"},
 		{"expiración inválida", map[string]string{"CHUSPA_MULTIPART_EXPIRY": "una semana"}, "CHUSPA_MULTIPART_EXPIRY inválida"},
+		{"verificación inválida", map[string]string{"CHUSPA_SCRUB_INTERVAL": "-1h"}, "CHUSPA_SCRUB_INTERVAL inválida"},
+		{"espacio libre inválido", map[string]string{"CHUSPA_MIN_FREE_MB": "1GB"}, "CHUSPA_MIN_FREE_MB inválido"},
 		{"dos fuentes del secreto", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_FILE": "/x"}, "no ambas"},
 	}
 	for _, tt := range tests {

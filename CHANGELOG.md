@@ -4,6 +4,13 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 
 ## [Sin publicar]
 
+### Añadido
+
+- Formato de datos versionado: los datos de 0.1.x y 0.2.x se migran solos al arrancar y una versión vieja se niega a abrir datos de una más nueva. Prueba de actualización con datos reales de v0.2.0.
+- Metadatos junto a cada blob y una marca por chuspa: `chuspa rebuild-index` reconstruye el índice sin borrar nada.
+- SHA-256 de cada objeto calculado por el servidor, `chuspa verify` y verificación periódica del contenido (`CHUSPA_SCRUB_INTERVAL`).
+- Espacio libre mínimo en disco (`CHUSPA_MIN_FREE_MB`): por debajo, las escrituras responden `507 InsufficientStorage`.
+
 ## [0.2.0] - 2026-10-13
 
 ### Añadido
