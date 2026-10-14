@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,14 @@ const (
 
 	// MinSecretLen es el largo mínimo del secreto raíz.
 	MinSecretLen = 32
+
+	// DefaultMinFreeMB es el espacio libre en disco por debajo del cual se
+	// rechazan escrituras.
+	DefaultMinFreeMB = 1024
+
+	// DefaultScrubInterval es cada cuánto se relee todo el contenido para
+	// detectar daños en disco.
+	DefaultScrubInterval = 7 * 24 * time.Hour
 )
 
 // Credenciales que aparecen en la documentación y en la landing. Nunca se
@@ -49,6 +58,10 @@ type Config struct {
 	LogFormat      string
 	// MultipartExpiry en cero desactiva la expiración.
 	MultipartExpiry time.Duration
+	// MinFreeBytes en cero desactiva la comprobación de espacio libre.
+	MinFreeBytes int64
+	// ScrubInterval en cero desactiva la verificación periódica.
+	ScrubInterval time.Duration
 }
 
 // Loopback indica si el servidor escucha solo en la interfaz local.
@@ -64,13 +77,27 @@ func Load(getenv func(string) string) (Config, error) {
 		RootUser:  getenv("CHUSPA_ROOT_USER"),
 
 		MultipartExpiry: DefaultMultipartExpiry,
+		MinFreeBytes:    DefaultMinFreeMB << 20,
+		ScrubInterval:   DefaultScrubInterval,
 	}
-	if v := getenv("CHUSPA_MULTIPART_EXPIRY"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil || d < 0 {
-			return Config{}, fmt.Errorf("CHUSPA_MULTIPART_EXPIRY inválida (%q): use una duración como 168h, o 0 para desactivarla", v)
+	for _, d := range []struct {
+		name string
+		dst  *time.Duration
+	}{{"CHUSPA_MULTIPART_EXPIRY", &c.MultipartExpiry}, {"CHUSPA_SCRUB_INTERVAL", &c.ScrubInterval}} {
+		if v := getenv(d.name); v != "" {
+			parsed, err := time.ParseDuration(v)
+			if err != nil || parsed < 0 {
+				return Config{}, fmt.Errorf("%s inválida (%q): use una duración como 168h, o 0 para desactivarla", d.name, v)
+			}
+			*d.dst = parsed
 		}
-		c.MultipartExpiry = d
+	}
+	if v := getenv("CHUSPA_MIN_FREE_MB"); v != "" {
+		mb, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || mb < 0 || mb > 1<<40 {
+			return Config{}, fmt.Errorf("CHUSPA_MIN_FREE_MB inválido (%q): use un número de MiB, o 0 para desactivarlo", v)
+		}
+		c.MinFreeBytes = mb << 20
 	}
 
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {

@@ -1,9 +1,11 @@
 // Package fsbolt implementa storage.Backend con blobs opacos en el sistema de
 // archivos y un índice bbolt.
 //
-//	<dir>/meta.db           índice: chuspas, objetos, subidas multipart
-//	<dir>/blobs/ab/cd/<id>  contenido, con un nombre generado por el servidor
-//	<dir>/staging/<id>      escrituras en curso
+//	<dir>/meta.db                índice: chuspas, objetos, subidas multipart
+//	<dir>/blobs/ab/cd/<id>       contenido, con un nombre generado por el servidor
+//	<dir>/blobs/ab/cd/<id>.meta  chuspa, key y registro del objeto (ver Rebuild)
+//	<dir>/chuspas/<nombre>       una marca por chuspa
+//	<dir>/staging/<id>           escrituras en curso
 //
 // La key del objeto vive solo en el índice y nunca forma parte de una ruta.
 // Toda escritura va a staging, se sincroniza, se mueve a blobs y solo
@@ -16,6 +18,7 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,11 +49,17 @@ var (
 type Backend struct {
 	dir string
 	db  *bolt.DB
+	// MinFreeBytes es el espacio libre mínimo en disco para aceptar
+	// escrituras; en cero no se comprueba.
+	MinFreeBytes int64
 }
 
 type objectRecord struct {
 	storage.Object
 	Blob string `json:"blob"`
+	// SHA256 del contenido, calculado por el servidor al escribir. Vacío en
+	// los objetos del formato 1.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type partRecord struct {
@@ -59,10 +68,11 @@ type partRecord struct {
 }
 
 type staged struct {
-	b    *Backend
-	id   string
-	path string
-	size int64
+	b      *Backend
+	id     string
+	path   string
+	size   int64
+	sha256 string
 }
 
 func (s *staged) Size() int64 { return s.size }
@@ -71,8 +81,14 @@ func (s *staged) Discard()    { os.Remove(s.path) }
 // Open abre (o crea) el almacenamiento en dir y limpia lo que haya quedado de
 // una ejecución anterior: escrituras a medias y blobs sin entrada en el índice.
 // Devuelve cuántos huérfanos borró.
-func Open(dir string) (*Backend, int, error) {
-	for _, d := range []string{dir, filepath.Join(dir, "blobs"), filepath.Join(dir, "staging")} {
+//
+// Los datos de versiones anteriores se migran al formato actual; los de una
+// versión más nueva no se abren.
+func Open(dir string) (*Backend, int, error) { return openDir(dir, true) }
+
+// openDir abre el almacenamiento; con sweep borra lo que no esté en el índice.
+func openDir(dir string, sweep bool) (*Backend, int, error) {
+	for _, d := range []string{dir, filepath.Join(dir, "blobs"), filepath.Join(dir, "staging"), filepath.Join(dir, markersDir)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, 0, fmt.Errorf("fsbolt: %w", err)
 		}
@@ -83,13 +99,19 @@ func Open(dir string) (*Backend, int, error) {
 	}
 	b := &Backend{dir: dir, db: db}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bktBuckets, bktObjects, bktUploads, bktParts} {
+		for _, name := range [][]byte{bktMeta, bktBuckets, bktObjects, bktUploads, bktParts} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	if err == nil {
+		err = b.checkFormat(false)
+	}
+	if err == nil && !sweep {
+		return b, 0, nil
+	}
 	if err == nil {
 		// Nadie más escribe todavía: todo lo que no esté en el índice sobra.
 		var orphans int
@@ -108,7 +130,12 @@ func OpenReadOnly(dir string) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fsbolt: no se pudo abrir el índice de %s (¿hay un servidor usándolo?): %w", dir, err)
 	}
-	return &Backend{dir: dir, db: db}, nil
+	b := &Backend{dir: dir, db: db}
+	if err := b.checkFormat(true); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("fsbolt: %w", err)
+	}
+	return b, nil
 }
 
 func (b *Backend) Close() error { return b.db.Close() }
@@ -210,14 +237,23 @@ func (b *Backend) collectOrphans(now time.Time, blobGrace, stagingGrace time.Dur
 		}
 	}
 
-	candidates := map[string]string{} // id -> ruta
+	candidates := map[string][]string{} // id -> el blob y sus metadatos
 	err = filepath.WalkDir(filepath.Join(b.dir, "blobs"), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		if older(d, blobGrace) {
-			candidates[d.Name()] = path
+		if !older(d, blobGrace) {
+			return nil
 		}
+		if strings.HasSuffix(d.Name(), tmpSuffix) {
+			// Metadatos a medio escribir: nunca son la versión vigente.
+			if os.Remove(path) == nil {
+				removed++
+			}
+			return nil
+		}
+		id := blobID(d.Name())
+		candidates[id] = append(candidates[id], path)
 		return nil
 	})
 	if err != nil || len(candidates) == 0 {
@@ -247,9 +283,11 @@ func (b *Backend) collectOrphans(now time.Time, blobGrace, stagingGrace time.Dur
 	if err != nil {
 		return removed, err
 	}
-	for _, path := range candidates {
-		if os.Remove(path) == nil {
-			removed++
+	for _, paths := range candidates {
+		for _, path := range paths {
+			if os.Remove(path) == nil {
+				removed++
+			}
 		}
 	}
 	return removed, nil
@@ -263,7 +301,11 @@ func (b *Backend) CreateBucket(_ context.Context, name string) error {
 		if bk.Get([]byte(name)) != nil {
 			return storage.ErrBucketExists
 		}
-		v, _ := json.Marshal(storage.Bucket{Name: name, Created: time.Now().UTC()})
+		bucket := storage.Bucket{Name: name, Created: time.Now().UTC()}
+		if err := b.writeMarker(bucket); err != nil {
+			return err
+		}
+		v, _ := json.Marshal(bucket)
 		return bk.Put([]byte(name), v)
 	})
 }
@@ -331,6 +373,7 @@ func (b *Backend) DeleteBucket(_ context.Context, name string) error {
 		return bk.Delete([]byte(name))
 	})
 	if err == nil {
+		b.removeMarker(name)
 		b.removeBlobs(blobs...)
 	}
 	return err
@@ -339,6 +382,9 @@ func (b *Backend) DeleteBucket(_ context.Context, name string) error {
 // ---- contenido ----
 
 func (b *Backend) Stage(ctx context.Context, r io.Reader) (storage.Staged, error) {
+	if err := b.checkSpace(); err != nil {
+		return nil, err
+	}
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -348,7 +394,8 @@ func (b *Backend) Stage(ctx context.Context, r io.Reader) (storage.Staged, error
 	if err != nil {
 		return nil, err
 	}
-	n, err := io.Copy(f, r)
+	sum := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, sum), r)
 	if err == nil {
 		err = ctx.Err()
 	}
@@ -360,9 +407,9 @@ func (b *Backend) Stage(ctx context.Context, r io.Reader) (storage.Staged, error
 	}
 	if err != nil {
 		os.Remove(path)
-		return nil, err
+		return nil, diskFull(err)
 	}
-	return &staged{b: b, id: id, path: path, size: n}, nil
+	return &staged{b: b, id: id, path: path, size: n, sha256: hex.EncodeToString(sum.Sum(nil))}, nil
 }
 
 // publish mueve el contenido de staging a su ubicación definitiva.
@@ -394,6 +441,7 @@ func (b *Backend) removeBlobs(ids ...string) {
 	for _, id := range ids {
 		if id != "" {
 			os.Remove(b.blobPath(id))
+			os.Remove(b.sidecarPath(id))
 		}
 	}
 }
@@ -406,10 +454,14 @@ func (b *Backend) PutObject(_ context.Context, bucket, key string, s storage.Sta
 		s.Discard()
 		return storage.Object{}, err
 	}
-	rec := objectRecord{Blob: st.id, Object: storage.Object{
+	rec := objectRecord{Blob: st.id, SHA256: st.sha256, Object: storage.Object{
 		Key: key, Size: st.size, ETag: in.ETag, Modified: time.Now().UTC(),
 		Metadata: in.Metadata, ChecksumAlgo: in.ChecksumAlgo, Checksum: in.Checksum,
 	}}
+	if err := b.writeSidecar(bucket, key, rec); err != nil {
+		b.removeBlobs(st.id)
+		return storage.Object{}, diskFull(err)
+	}
 	var old string
 	err = b.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bktBuckets).Get([]byte(bucket)) == nil {
@@ -861,7 +913,11 @@ func (b *Backend) CompleteUpload(ctx context.Context, bucket, key, id string, co
 		st.Discard()
 		return storage.Object{}, err
 	}
-	rec.Blob = pub.id
+	rec.Blob, rec.SHA256 = pub.id, pub.sha256
+	if err := b.writeSidecar(bucket, key, rec); err != nil {
+		b.removeBlobs(pub.id)
+		return storage.Object{}, diskFull(err)
+	}
 	var garbage []string
 	err = b.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bktBuckets).Get([]byte(bucket)) == nil {

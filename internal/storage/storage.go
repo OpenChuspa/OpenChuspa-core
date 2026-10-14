@@ -20,6 +20,8 @@ var (
 	ErrPartTooSmall   = errors.New("storage: una parte que no es la última es menor al mínimo")
 	ErrPrecondition   = errors.New("storage: no se cumple la condición sobre el objeto existente")
 	ErrBadDigest      = errors.New("storage: el checksum declarado no coincide con el contenido")
+	// ErrInsufficientStorage indica que el disco no tiene el espacio libre mínimo.
+	ErrInsufficientStorage = errors.New("storage: no queda espacio libre suficiente en disco")
 )
 
 // MinPartSize es el tamaño mínimo de toda parte que no sea la última.

@@ -112,6 +112,8 @@ export AWS_ACCESS_KEY_ID=mi-llave AWS_SECRET_ACCESS_KEY="$SECRETO"
 | `CHUSPA_ALLOW_ANONYMOUS` | `false` | Sin autenticación. Solo se acepta escuchando en loopback. |
 | `CHUSPA_LOG_FORMAT` | `json` | `json` o `text`. |
 | `CHUSPA_MULTIPART_EXPIRY` | `168h` | Edad a la que una subida multipart sin completar se aborta sola. `0` la desactiva. |
+| `CHUSPA_MIN_FREE_MB` | `1024` | Espacio libre mínimo en disco, en MiB. Por debajo, las escrituras responden `507 InsufficientStorage`. `0` lo desactiva. |
+| `CHUSPA_SCRUB_INTERVAL` | `168h` | Cada cuánto se relee todo el contenido y se compara con su SHA-256; cada objeto dañado queda en el log como error. `0` lo desactiva. |
 
 El servidor **no arranca** sin credenciales, con un secreto corto, en modo anónimo fuera de loopback, ni con las credenciales de ejemplo de la documentación fuera de loopback.
 
@@ -121,14 +123,27 @@ No hay TLS propio todavía: fuera de loopback necesita un proxy con TLS delante,
 
 ```
 <CHUSPA_DATA_DIR>/
-  meta.db          índice bbolt: chuspas, objetos y subidas multipart
-  blobs/ab/cd/…    contenido, con un nombre aleatorio generado por el servidor
-  staging/         escrituras en curso
+  meta.db               índice bbolt: chuspas, objetos y subidas multipart
+  blobs/ab/cd/<id>      contenido, con un nombre aleatorio generado por el servidor
+  blobs/ab/cd/<id>.meta chuspa, key y metadatos del objeto, para reconstruir el índice
+  chuspas/<nombre>      una marca por chuspa
+  staging/              escrituras en curso
 ```
 
 La key de un objeto vive solo en el índice y nunca forma parte de una ruta de archivo, así que `../../etc/passwd` es un nombre como cualquier otro. Cada escritura va a `staging/`, se sincroniza a disco, se mueve a `blobs/` y solo entonces se confirma en el índice: una caída deja el objeto anterior o el nuevo, nunca uno a medias. Al arrancar se borran los restos de escrituras interrumpidas.
 
-Con el servidor en marcha, cada hora se borran los blobs sin referencia y se abortan las subidas multipart abandonadas, y cada día queda una copia consistente del índice en `meta.db.bak`. Si `meta.db` se daña, se detiene el servidor y se reemplaza por esa copia; los objetos escritos después de la copia se pierden del índice y sus blobs se borran en el siguiente arranque.
+Con el servidor en marcha, cada hora se borran los blobs sin referencia y se abortan las subidas multipart abandonadas, cada día queda una copia consistente del índice en `meta.db.bak` y, cada semana, se relee todo el contenido contra su SHA-256 para detectar un disco que se está dañando.
+
+**Si `meta.db` se daña o se pierde**, con el servidor detenido:
+
+```bash
+CHUSPA_DATA_DIR=./data ./chuspa rebuild-index   # índice nuevo desde blobs/ y chuspas/
+CHUSPA_DATA_DIR=./data ./chuspa verify          # relee todo; sale con error si algo no cuadra
+```
+
+`rebuild-index` no borra nada: renombra el índice anterior a `meta.db.reemplazado-<fecha>` y aparta en `recuperados/` lo que no puede asignar a un objeto (partes de subidas sin completar, versiones viejas que quedaron por una caída). Las subidas multipart en curso no se recuperan; los objetos y las chuspas, sí, también las vacías.
+
+**Formato y actualizaciones.** El índice guarda la versión del formato de los datos. Al arrancar, una versión nueva migra sola los datos de las anteriores (de 0.1.x y 0.2.x al formato 2, escribiendo los metadatos junto a cada blob), y una versión vieja se niega a abrir datos de una más nueva para no dañarlos. El CI prueba la migración con datos reales escritos por v0.2.0 (`internal/storage/fsbolt/testdata/formato1`). Antes de actualizar, conviene igual una copia de la carpeta de datos con el servidor detenido.
 
 Como las keys viven en el índice, los datos no se inspeccionan con `ls`. Con el servidor detenido:
 
@@ -142,7 +157,7 @@ export CHUSPA_DATA_DIR=./data
 ## Código
 
 ```
-cmd/chuspa/              binario: serve, healthcheck, inspect, export, version
+cmd/chuspa/              binario: serve, healthcheck, inspect, export, verify, rebuild-index, version
 cmd/ve/                  CLI caleña: mira, crea, subi, baja, borra, sincroniza
 internal/config/         variables de entorno y validación de arranque
 internal/s3api/          enrutado, handlers, XML y catálogo de errores
@@ -192,5 +207,4 @@ La suite de compatibilidad genera credenciales aleatorias en cada ejecución y a
 
 ## Pendiente
 
-- Reconstruir el índice a partir de los blobs: hoy la recuperación es la copia diaria `meta.db.bak`.
 - Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, TLS nativo, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.

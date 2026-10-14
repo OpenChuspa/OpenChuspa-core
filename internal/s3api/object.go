@@ -416,10 +416,7 @@ func (s *Server) deleteObjects(r *request) *APIError {
 		}
 		switch {
 		case apiErr != nil:
-			if apiErr.Status >= 500 && apiErr != ErrNotImplemented {
-				s.Log.Error("error interno", "request_id", r.w.Header().Get("x-amz-request-id"), "error", apiErr.Message)
-				apiErr = ErrInternal
-			}
+			apiErr = s.hideInternal(apiErr, r.w.Header().Get("x-amz-request-id"))
 			out.Errors = append(out.Errors, deleteError{Key: o.Key, Code: apiErr.Code, Message: apiErr.Message})
 		case !in.Quiet:
 			out.Deleted = append(out.Deleted, deletedEntry{Key: o.Key})

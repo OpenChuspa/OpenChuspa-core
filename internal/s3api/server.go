@@ -92,12 +92,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req.payload = payload
 
 	if apiErr := s.route(req); apiErr != nil {
-		if apiErr.Status >= 500 && apiErr != ErrNotImplemented {
-			s.Log.Error("error interno", "request_id", w.Header().Get("x-amz-request-id"), "error", apiErr.Message)
-			apiErr = ErrInternal
-		}
+		apiErr = s.hideInternal(apiErr, w.Header().Get("x-amz-request-id"))
 		WriteError(w, r, apiErr)
 	}
+}
+
+// hideInternal registra los errores 5xx y los reemplaza por InternalError para
+// no exponer detalles internos. Los que el cliente debe conocer pasan tal cual.
+func (s *Server) hideInternal(apiErr *APIError, requestID string) *APIError {
+	switch {
+	case apiErr.Status < 500 || apiErr == ErrNotImplemented:
+		return apiErr
+	case apiErr == ErrInsufficientStorage:
+		s.Log.Warn("escritura rechazada por falta de espacio en disco", "request_id", requestID)
+		return apiErr
+	}
+	s.Log.Error("error interno", "request_id", requestID, "error", apiErr.Message)
+	return ErrInternal
 }
 
 func authError(err error) *APIError {
@@ -233,6 +244,8 @@ func storageError(err error) *APIError {
 		return ErrBadDigest
 	case errors.Is(err, storage.ErrPrecondition):
 		return ErrPreconditionFailed
+	case errors.Is(err, storage.ErrInsufficientStorage):
+		return ErrInsufficientStorage
 	}
 	return &APIError{"InternalError", err.Error(), http.StatusInternalServerError}
 }

@@ -155,7 +155,11 @@ s3 s3 cp salsa.txt "s3://$BUCKET/$rara"
 s3 s3 ls "s3://$BUCKET/con espacio/" | grep -qF 'ñandú+más&raro=(1)*.txt' || fail "la key rara no se lista bien"
 s3 s3 cp "s3://$BUCKET/$rara" rara.txt
 cmp salsa.txt rara.txt
-[ "$(ls "$WORK/data" | sort | tr '\n' ' ')" = "blobs meta.db staging " ] || fail "hay archivos inesperados en la carpeta de datos"
+[ "$(ls "$WORK/data" | sort | tr '\n' ' ')" = "blobs chuspas meta.db staging " ] || fail "hay archivos inesperados en la carpeta de datos"
+# Las keys nunca llegan al sistema de archivos: blobs/ solo tiene ids
+# generados por el servidor y chuspas/ solo nombres de chuspa válidos.
+[ -z "$(find "$WORK/data/blobs" -type f | grep -vE '/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{32}(\.meta)?$')" ] || fail "hay archivos con nombres no generados en blobs/"
+[ -z "$(ls "$WORK/data/chuspas" | grep -vE '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$')" ] || fail "hay marcas de chuspa con nombres inválidos"
 [ ! -e "$WORK/etc" ] || fail "una key salió de la carpeta de datos"
 
 step "integridad"
@@ -268,6 +272,24 @@ CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" inspect | grep -q "^$BUCKET .* 1  *1
 CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" inspect "$BUCKET" | grep -qF '"../../etc/passwd"' || fail "inspect no lista la key"
 CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" export "$BUCKET" ../../etc/passwd exportado.txt
 cmp salsa.txt exportado.txt
+
+step "verify y rebuild-index con el servidor detenido"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" verify | grep -q "0 dañados" || fail "verify encontró daños en datos sanos"
+mv "$WORK/data/meta.db" "$WORK/meta.db.perdido"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" rebuild-index | grep -q "1 objetos" || fail "rebuild-index no recuperó el objeto"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" inspect "$BUCKET" | grep -qF '"../../etc/passwd"' || fail "tras reconstruir falta la key"
+CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" verify | grep -q "0 dañados" || fail "verify falló tras reconstruir"
+blob=$(find "$WORK/data/blobs" -type f ! -name '*.meta' | head -1)
+printf 'X' | dd of="$blob" bs=1 seek=0 conv=notrunc 2>/dev/null
+if CHUSPA_DATA_DIR="$WORK/data" "$WORK/chuspa" verify >verify.txt; then fail "verify no detectó un blob alterado"; fi
+grep -q "^DAÑADO" verify.txt || fail "verify no listó el objeto dañado"
+
+step "disco casi lleno: se rechazan escrituras con un error claro"
+export CHUSPA_MIN_FREE_MB=1099511627776
+start_server
+expect_error InsufficientStorage s3 s3api put-object --bucket "$BUCKET" --key lleno.txt --body salsa.txt
+stop_server TERM
+unset CHUSPA_MIN_FREE_MB
 
 step "sin secretos en los logs"
 if grep -qe "$SECRET_KEY" -e 'Signature=' -e 'AWS4-HMAC-SHA256' "$WORK/server.log"; then
