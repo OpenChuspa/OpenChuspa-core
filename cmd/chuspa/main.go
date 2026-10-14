@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/OpenChuspa/OpenChuspa-core/internal/auth"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/config"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/httpx"
+	"github.com/OpenChuspa/OpenChuspa-core/internal/metrics"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/s3api"
 	"github.com/OpenChuspa/OpenChuspa-core/internal/storage/fsbolt"
 )
@@ -96,7 +98,9 @@ func serve() error {
 		log.Info("se limpiaron restos de una ejecución anterior", "archivos", orphans)
 	}
 
-	api := &s3api.Server{Backend: backend, Region: cfg.Region, Log: log}
+	reg := metrics.New(version)
+	st := newOpsState(reg, cfg.DataDir)
+	api := &s3api.Server{Backend: backend, Region: cfg.Region, Log: log, OnAuthBlock: func() { st.authBlocks.Add(1) }}
 	if cfg.RootUser != "" {
 		api.Verifier = &auth.Verifier{AccessKey: cfg.RootUser, SecretKey: cfg.RootPassword,
 			PreviousSecretKey: cfg.PreviousRootPassword, Region: cfg.Region}
@@ -130,7 +134,18 @@ func serve() error {
 	}
 	srv := httpx.NewServer(httpx.Wrap(api, log, func(w http.ResponseWriter, r *http.Request) {
 		s3api.WriteError(w, r, s3api.ErrInternal)
-	}))
+	}, reg.ObserveRequest))
+
+	var metricsSrv *http.Server
+	if cfg.MetricsAddr != "" {
+		ml, err := net.Listen("tcp", cfg.MetricsAddr)
+		if err != nil {
+			return fmt.Errorf("métricas: %w", err)
+		}
+		metricsSrv = &http.Server{Handler: reg, ReadHeaderTimeout: httpx.ReadHeaderTimeout}
+		go metricsSrv.Serve(ml)
+		log.Info("métricas de Prometheus en /metrics", "addr", ml.Addr().String())
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -139,9 +154,9 @@ func serve() error {
 	log.Info("OpenChuspa escuchando", "addr", listener.Addr().String(), "region", cfg.Region,
 		"data_dir", cfg.DataDir, "version", version, "anonymous", api.Verifier == nil, "tls", cfg.TLSCertFile != "")
 
-	go janitor(ctx, backend, cfg.MultipartExpiry, log)
+	go janitor(ctx, backend, cfg.MultipartExpiry, log, st)
 	if cfg.ScrubInterval > 0 {
-		go scrubber(ctx, backend, cfg.ScrubInterval, log)
+		go scrubber(ctx, backend, cfg.ScrubInterval, log, st)
 	}
 
 	select {
@@ -153,6 +168,9 @@ func serve() error {
 	log.Info("apagando: se esperan las peticiones en curso")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if metricsSrv != nil {
+		metricsSrv.Close()
+	}
 	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -202,7 +220,7 @@ const (
 
 // janitor borra huérfanos, aborta subidas multipart abandonadas y deja una
 // copia del índice, mientras el servidor atiende peticiones.
-func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Duration, log *slog.Logger) {
+func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Duration, log *slog.Logger, st *opsState) {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	var lastBackup time.Time
@@ -214,15 +232,18 @@ func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Durati
 			res, err := backend.Sweep(now, blobGrace, stagingGrace, uploadTTL)
 			switch {
 			case err != nil:
+				st.maintenanceErrors.Add(1)
 				log.Error("falló el mantenimiento", "error", err.Error())
 			case res.Orphans > 0 || res.ExpiredUploads > 0:
 				log.Info("mantenimiento", "huerfanos", res.Orphans, "subidas_expiradas", res.ExpiredUploads)
 			}
 			if now.Sub(lastBackup) >= backupInterval {
 				if err := backend.Backup(); err != nil {
+					st.maintenanceErrors.Add(1)
 					log.Error("falló la copia del índice", "error", err.Error())
 				} else {
 					lastBackup = now
+					st.lastBackup.Store(now.Unix())
 				}
 			}
 		}
@@ -232,7 +253,7 @@ func janitor(ctx context.Context, backend *fsbolt.Backend, uploadTTL time.Durati
 // scrubber relee todo el contenido cada interval y registra como error cada
 // objeto que no coincide con su hash: es la forma de enterarse de un disco que
 // se está dañando antes de que alguien lea el objeto.
-func scrubber(ctx context.Context, backend *fsbolt.Backend, interval time.Duration, log *slog.Logger) {
+func scrubber(ctx context.Context, backend *fsbolt.Backend, interval time.Duration, log *slog.Logger, st *opsState) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -247,11 +268,39 @@ func scrubber(ctx context.Context, backend *fsbolt.Backend, interval time.Durati
 				log.Error("objeto dañado", "chuspa", p.Bucket, "key", p.Key, "blob", p.Blob, "motivo", p.Reason)
 			})
 			if err != nil && ctx.Err() == nil {
+				st.maintenanceErrors.Add(1)
 				log.Error("falló la verificación del contenido", "error", err.Error())
 				continue
 			}
+			st.scrubDamaged.Store(int64(problems))
+			st.lastScrub.Store(time.Now().Unix())
 			log.Info("verificación del contenido", "objetos", res.Objects, "bytes", res.Bytes,
 				"dañados", problems, "duracion", time.Since(start).Round(time.Second).String())
 		}
 	}
+}
+
+// opsState es lo que el mantenimiento reporta a las métricas.
+type opsState struct {
+	maintenanceErrors, authBlocks *metrics.Counter
+	lastBackup, lastScrub         atomic.Int64 // unix; 0 si todavía no ocurrió
+	scrubDamaged                  atomic.Int64
+}
+
+func newOpsState(reg *metrics.Metrics, dataDir string) *opsState {
+	st := &opsState{
+		maintenanceErrors: reg.Counter("chuspa_maintenance_errors_total", "Fallos del mantenimiento, de la copia del índice o de la verificación."),
+		authBlocks:        reg.Counter("chuspa_auth_blocks_total", "IPs bloqueadas por acumular autenticaciones fallidas."),
+	}
+	reg.GaugeFunc("chuspa_disk_free_bytes", "Espacio libre en el disco de los datos.", func() float64 {
+		free, _ := fsbolt.FreeBytes(dataDir)
+		return float64(free)
+	})
+	reg.GaugeFunc("chuspa_last_backup_timestamp_seconds", "Última copia del índice en meta.db.bak (0: ninguna desde el arranque).",
+		func() float64 { return float64(st.lastBackup.Load()) })
+	reg.GaugeFunc("chuspa_last_scrub_timestamp_seconds", "Última verificación completa del contenido (0: ninguna desde el arranque).",
+		func() float64 { return float64(st.lastScrub.Load()) })
+	reg.GaugeFunc("chuspa_scrub_damaged_objects", "Objetos dañados en la última verificación.",
+		func() float64 { return float64(st.scrubDamaged.Load()) })
+	return st
 }
