@@ -7,7 +7,7 @@ import (
 
 const maxKeyLen = 1024
 
-// Sin puntos en el MVP: el estilo de host virtual llega en la fase 2.
+// Sin puntos: el direccionamiento es solo por ruta.
 var bucketNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 
 func validBucketName(name string) bool { return bucketNameRe.MatchString(name) }

@@ -40,7 +40,7 @@ var (
 	ErrSignature = errors.New("auth: la firma no coincide")
 	// ErrSkew: x-amz-date está fuera de la ventana permitida.
 	ErrSkew = errors.New("auth: fecha fuera de la ventana permitida")
-	// ErrUnsupported: mecanismo de autenticación que el motor aún no soporta.
+	// ErrUnsupported: mecanismo de autenticación que el motor no soporta.
 	ErrUnsupported = errors.New("auth: mecanismo de firma no soportado")
 )
 
@@ -122,7 +122,7 @@ func ParseAuthorization(h string) (Authorization, error) {
 // se valida después, según el valor de x-amz-content-sha256.
 func (v *Verifier) Verify(r *http.Request) (*Identity, error) {
 	if r.URL.Query().Has("X-Amz-Signature") || r.URL.Query().Has("Signature") {
-		return nil, ErrUnsupported // URLs prefirmadas: fase 2
+		return nil, ErrUnsupported // URLs prefirmadas
 	}
 	header := r.Header.Get("Authorization")
 	if header == "" {

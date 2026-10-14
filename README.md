@@ -6,7 +6,7 @@ El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decis
 
 ## Estado
 
-Versión `0.3.0`, la primera que cierra el MVP: un nodo, con datos versionados y reconstruibles, verificación de contenido, TLS nativo y probado en cada cambio contra los SDK de AWS, `ceph/s3-tests` y una prueba de resistencia con `kill -9`. La imagen está en Docker Hub (`openchuspa/chuspa`) y en `ghcr.io/openchuspa/chuspa`, firmada con cosign. Todavía no ha pasado una auditoría de seguridad externa: mantenga copias de lo que no pueda perder, como con cualquier almacenamiento de un solo nodo.
+Versión estable `1.0.0`: un nodo, con datos versionados y reconstruibles, verificación de contenido, TLS nativo y probado en cada cambio contra los SDK de AWS, `ceph/s3-tests` y una prueba de resistencia con `kill -9`. La imagen está en Docker Hub (`openchuspa/chuspa`) y en `ghcr.io/openchuspa/chuspa`, firmada con cosign. Como con cualquier almacenamiento de un solo nodo, mantenga copias de lo que no pueda perder (ver «Cómo guarda los datos»).
 
 Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en CI, en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
 
@@ -22,7 +22,7 @@ Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo q
 | Cuerpos `aws-chunked` firmados y sin firmar, con trailers | Funciona |
 | Checksums CRC32, CRC32C, CRC64NVME, SHA-1 y SHA-256 | Funciona |
 | ListObjectVersions y `versionId=null` | Solo la vista de una chuspa sin versionado |
-| GetObjectTagging | Siempre responde vacío: aún no se pueden poner tags |
+| GetObjectTagging | Responde siempre una lista vacía |
 | URLs prefirmadas, versionado, ACL, políticas, tags, CORS, lifecycle, object lock, cifrado | `NotImplemented` |
 
 Clientes probados de punta a punta en CI: **AWS CLI v2**, **boto3**, **`@aws-sdk/client-s3`**, **`aws-sdk-go-v2`** y **curl**. De `ceph/s3-tests` pasan 222 pruebas de 744 ejecutadas; el detalle está en [`docs/compatibilidad.md`](./docs/compatibilidad.md).
@@ -234,7 +234,3 @@ La suite de compatibilidad genera credenciales aleatorias en cada ejecución y a
 - Las vulnerabilidades se reportan en privado: [SECURITY.md](./SECURITY.md).
 - Para contribuir: [CONTRIBUTING.md](./CONTRIBUTING.md) y [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Quién decide y cómo: [GOVERNANCE.md](./GOVERNANCE.md).
 - Licencia: [Apache-2.0](./LICENSE).
-
-## Pendiente
-
-- Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.

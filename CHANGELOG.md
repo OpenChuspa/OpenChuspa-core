@@ -1,8 +1,18 @@
 # Changelog
 
-Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [SemVer](https://semver.org/lang/es/). Mientras el proyecto esté en `0.x`, una versión menor puede romper compatibilidad y lo dirá aquí. El formato de los datos en disco nunca se rompe sin migración automática.
+Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [SemVer](https://semver.org/lang/es/). Desde 1.0.0 rige SemVer estricto: la API S3 soportada, las variables `CHUSPA_*`, los comandos de `chuspa` y `ve`, y el formato de los datos en disco solo cambian de forma incompatible con una versión mayor. El formato de los datos nunca cambia sin migración automática.
 
 ## [Sin publicar]
+
+## [1.0.0] - 2026-10-14
+
+Primera versión estable. Mismo motor que 0.3.0, con la compatibilidad comprometida para toda la serie 1.x.
+
+### Cambiado
+
+- Los mensajes de `NotImplemented` y `NoSuchVersion` describen lo que el motor hace, sin referencias a versiones futuras.
+- La documentación, `SECURITY.md` y `docs/compatibilidad.md` dejan de mencionar trabajo no publicado.
+- `docker-compose.yml` usa `openchuspa/chuspa:1.0.0`.
 
 ## [0.3.0] - 2026-10-13
 

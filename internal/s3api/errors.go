@@ -19,7 +19,7 @@ var (
 	ErrAccessDenied          = &APIError{"AccessDenied", "Acceso denegado.", http.StatusForbidden}
 	ErrSignatureDoesNotMatch = &APIError{"SignatureDoesNotMatch", "La firma de la petición no coincide con la calculada por el servidor.", http.StatusForbidden}
 	ErrRequestTimeTooSkewed  = &APIError{"RequestTimeTooSkewed", "La hora de la petición se aleja demasiado de la del servidor.", http.StatusForbidden}
-	ErrNotImplemented        = &APIError{"NotImplemented", "Esta operación todavía no está implementada en OpenChuspa.", http.StatusNotImplemented}
+	ErrNotImplemented        = &APIError{"NotImplemented", "Esta operación no está implementada en OpenChuspa.", http.StatusNotImplemented}
 	ErrMethodNotAllowed      = &APIError{"MethodNotAllowed", "El método no está permitido sobre este recurso.", http.StatusMethodNotAllowed}
 	ErrInvalidRequest        = &APIError{"InvalidRequest", "La petición no es válida.", http.StatusBadRequest}
 	ErrInvalidArgument       = &APIError{"InvalidArgument", "Argumento inválido.", http.StatusBadRequest}
@@ -28,7 +28,7 @@ var (
 	ErrInvalidKey            = &APIError{"InvalidArgument", "La key debe ser UTF-8 válido.", http.StatusBadRequest}
 	ErrNoSuchBucket          = &APIError{"NoSuchBucket", "La chuspa no existe.", http.StatusNotFound}
 	ErrNoSuchKey             = &APIError{"NoSuchKey", "El objeto no existe.", http.StatusNotFound}
-	ErrNoSuchVersion         = &APIError{"NoSuchVersion", "La versión indicada no existe: OpenChuspa todavía no versiona objetos.", http.StatusNotFound}
+	ErrNoSuchVersion         = &APIError{"NoSuchVersion", "La versión indicada no existe: OpenChuspa no versiona objetos.", http.StatusNotFound}
 	ErrNoSuchUpload          = &APIError{"NoSuchUpload", "La subida multipart no existe; pudo haber sido abortada o completada.", http.StatusNotFound}
 	ErrBucketAlreadyOwned    = &APIError{"BucketAlreadyOwnedByYou", "La chuspa ya existe y es suya.", http.StatusConflict}
 	ErrBucketNotEmpty        = &APIError{"BucketNotEmpty", "La chuspa no está vacía.", http.StatusConflict}

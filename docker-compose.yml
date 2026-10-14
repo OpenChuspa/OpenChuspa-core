@@ -8,7 +8,7 @@
 # Siempre la versión exacta de la imagen, nunca latest.
 services:
   chuspa:
-    image: docker.io/openchuspa/chuspa:0.3.0
+    image: docker.io/openchuspa/chuspa:1.0.0
     ports:
       # Solo en loopback: exponerlo es una decisión de quien despliega, y
       # exige un proxy con TLS delante.

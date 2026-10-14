@@ -24,16 +24,16 @@ Cada corrección de seguridad sale con una versión nueva y un aviso de segurida
 
 ## Versiones con soporte
 
-El proyecto está en `0.x`: solo recibe correcciones la última versión publicada.
+Reciben correcciones de seguridad las versiones de la serie 1.x, sobre la última versión menor publicada.
 
 ## Alcance
 
 Dentro del alcance: saltarse la autenticación o la verificación de firma, leer o escribir fuera de la carpeta de datos, corromper objetos ajenos, agotar los recursos del servidor con peticiones pequeñas, fugas de secretos en logs o respuestas.
 
-Fuera del alcance en esta etapa, porque son límites conocidos y documentados:
+Fuera del alcance, porque son límites del diseño y están documentados:
 
 - un atacante con acceso de escritura al volumen de datos;
-- la falta de cifrado en reposo (planeado para la fase 3);
+- el cifrado en reposo: el motor no cifra el disco; use cifrado de volumen;
 - exponer el servidor fuera de loopback sin TLS, propio (`CHUSPA_TLS_CERT_FILE`) o de un proxy.
 
 ## Verificar lo que ejecuta

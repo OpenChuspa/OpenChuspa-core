@@ -1,6 +1,6 @@
 # ADR 0001: la firma SigV4 se verifica con canonicalización propia
 
-- **Estado:** aceptada con la primera implementación; pendiente de revisión por los mantenedores
+- **Estado:** aceptada
 - **Fecha:** 2026-10-13
 - **Reemplaza:** la fila 6 de la sección 0 y el paso 4 de la sección 7.3 de `MVP-ENGINE-v2.md`
 

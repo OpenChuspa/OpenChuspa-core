@@ -2,7 +2,7 @@
 
 Qué funciona hoy contra clientes reales y cuánto de la suite de conformidad pasa. Todo lo que aparece aquí se ejecuta en CI en cada pull request; lo que no aparece no se promete.
 
-Última actualización: 2026-10-13 (v0.3.0).
+Última actualización: 2026-10-14 (v1.0.0).
 
 ## Clientes
 
@@ -50,30 +50,17 @@ Suite: [`ceph/s3-tests`](https://github.com/ceph/s3-tests) en el commit `5b39871
 
 Las 222 están listadas en [`test/s3tests/passing.txt`](../test/s3tests/passing.txt) y el CI las ejecuta todas en cada pull request: si una deja de pasar, el CI falla. El número solo puede subir.
 
-Por qué fallan las demás, de mayor a menor:
-
-| Motivo | Estado en el roadmap |
-|---|---|
-| ACL de chuspas y objetos, y acceso anónimo | Fase 2 (políticas) |
-| Versionado y marcadores de borrado | Fase 3 |
-| Políticas de chuspa y bloqueo de acceso público | Fase 2 |
-| Cifrado SSE-C, SSE-S3 y SSE-KMS | Fase 3 |
-| Lifecycle | Fase 3 |
-| Subidas por formulario (`POST Object`) y URLs prefirmadas | Fase 2 |
-| Tags de objeto, CORS, object lock, logging, ownership controls | Fases 2 y 3 |
-| `GetObjectAttributes` y lectura por número de parte | Sin planear todavía |
-| Comportamientos propios de Ceph RGW (`x-rgw-*`, listado sin orden, cuotas) | No aplica |
-| Segunda identidad: la suite espera dos usuarios y el motor tiene una credencial raíz | Fase 2 |
+Las demás prueban operaciones que OpenChuspa no ofrece y que responden `501 NotImplemented`: ACL y acceso anónimo, versionado, políticas, cifrado SSE, lifecycle, subidas por formulario, URLs prefirmadas, tags, CORS, object lock, logging, ownership controls, `GetObjectAttributes`, una segunda identidad y comportamientos propios de Ceph RGW (`x-rgw-*`, cuotas).
 
 Diferencias deliberadas con lo que espera la suite:
 
 - Crear una chuspa que ya existe responde `BucketAlreadyOwnedByYou` (409) siempre; la suite espera el éxito que da S3 en `us-east-1`.
-- Los nombres de chuspa con puntos se rechazan mientras no exista el estilo de host virtual.
+- Los nombres de chuspa con puntos se rechazan: el direccionamiento es solo por ruta.
 - Completar una subida con el mismo número de parte repetido responde `InvalidPartOrder`.
 
-**Meta del MVP (v0.3.0):** cero regresiones sobre las 222 y ninguna falla atribuible a una operación que el motor declara soportar; las que fallan corresponden a las funciones de la tabla anterior, fuera del alcance del MVP. Medido el 2026-10-13 con `run.sh --all`: 222 de 744, igual que en v0.2.0. Cada fase del roadmap sube la meta con las pruebas de lo que implementa.
+**Criterio de la serie 1.x:** cero regresiones sobre las 222 y ninguna falla atribuible a una operación que el motor declara soportar. Medido el 2026-10-14 con `run.sh --all`: 222 de 744.
 
-Para recalcular la lista después de implementar algo:
+Para recalcular la lista:
 
 ```bash
 test/s3tests/run.sh --all   # reescribe test/s3tests/passing.txt
