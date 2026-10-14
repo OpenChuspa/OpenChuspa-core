@@ -12,6 +12,8 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 - Espacio libre mínimo en disco (`CHUSPA_MIN_FREE_MB`): por debajo, las escrituras responden `507 InsufficientStorage`.
 - TLS nativo (`CHUSPA_TLS_CERT_FILE`, `CHUSPA_TLS_KEY_FILE`), mínimo TLS 1.2, con recarga del certificado sin reiniciar.
 - Rotación del secreto sin corte (`CHUSPA_ROOT_PASSWORD_PREVIOUS`).
+- Métricas de Prometheus en un puerto aparte (`CHUSPA_METRICS_ADDR`).
+- Prueba de resistencia con `kill -9` (`test/soak`) y CI nocturno con fuzzing largo y resistencia.
 - Bloqueo por fuerza bruta: 20 autenticaciones fallidas por minuto bloquean la IP 5 minutos (`CHUSPA_AUTH_MAX_FAILURES`).
 
 ## [0.2.0] - 2026-10-13
