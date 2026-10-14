@@ -4,6 +4,12 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 
 ## [Sin publicar]
 
+## [0.2.0] - 2026-10-13
+
+### Añadido
+
+- CLI `ve` con los comandos `mira`, `crea`, `subi`, `baja`, `borra` y `sincroniza` sobre direcciones `chuspa://`, incluida en los binarios del release.
+
 ## [0.1.0] - 2026-10-13
 
 ### Añadido
@@ -14,6 +20,5 @@ Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://k
 - Almacenamiento con blobs opacos e índice bbolt, escritura atómica, limpieza de huérfanos y expiración de subidas multipart abandonadas.
 - Escrituras y borrados condicionales, y completado idempotente de subidas multipart.
 - Subcomandos `healthcheck`, `inspect` y `export`.
-- CLI `ve` con los comandos `mira`, `crea`, `subi`, `baja`, `borra` y `sincroniza` sobre direcciones `chuspa://`, incluida en los binarios del release.
-- Imagen distroless sin root y `docker-compose.yml` endurecido.
+- Imagen distroless sin root, publicada firmada en `ghcr.io/openchuspa/chuspa` y `docker.io/openchuspa/chuspa`, y `docker-compose.yml` endurecido.
 - Suite de compatibilidad con AWS CLI v2, boto3, `@aws-sdk/client-s3`, `aws-sdk-go-v2` y curl, y conformidad medida con `ceph/s3-tests`.
