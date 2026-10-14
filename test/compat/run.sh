@@ -73,7 +73,7 @@ expect_no_start() {
 
 cd "$WORK"
 step "compilar"
-(cd "$ROOT" && go build -o "$WORK/chuspa" ./cmd/chuspa)
+(cd "$ROOT" && go build -o "$WORK/chuspa" ./cmd/chuspa && go build -o "$WORK/ve" ./cmd/ve)
 
 step "arranque seguro"
 expect_no_start "sin credenciales"
@@ -120,6 +120,31 @@ s3 s3 cp muchos "s3://$BUCKET/muchos/" --recursive --only-show-errors
 [ "$(s3 s3 ls "s3://$BUCKET/muchos/" | wc -l | tr -d ' ')" = 1050 ] || fail "el listado paginado no devolvió 1050 objetos"
 [ "$(s3 s3api list-objects-v2 --bucket "$BUCKET" --delimiter / --query 'CommonPrefixes[].Prefix' --output text | tr '\t' ' ')" = "muchos/ test/" ] ||
   fail "los prefijos comunes no coinciden"
+
+step "CLI ve: los comandos que muestra la landing"
+ve() { VE_ENDPOINT="$ENDPOINT" "$WORK/ve" "$@"; }
+ve crea chuspa://prod-chuspa-name
+ve subi ./salsa.txt a chuspa://prod-chuspa-name/test/
+ve mira chuspa:// | grep -q 'chuspa://prod-chuspa-name$' || fail "ve mira no lista la chuspa"
+ve mira chuspa://prod-chuspa-name/test/ | grep -q 'test/salsa.txt$' || fail "ve mira no lista el objeto"
+mkdir ve-bajadas
+ve baja chuspa://prod-chuspa-name/test/salsa.txt ve-bajadas
+cmp salsa.txt ve-bajadas/salsa.txt
+ve subi grande.bin a chuspa://prod-chuspa-name/
+s3 s3api head-object --bucket prod-chuspa-name --key grande.bin --query ETag --output text | grep -q -- '-[0-9]*"$' ||
+  fail "ve no subió el archivo grande en partes"
+ve baja chuspa://prod-chuspa-name/grande.bin ve-grande.bin
+cmp grande.bin ve-grande.bin
+ve sincroniza muchos chuspa://prod-chuspa-name/muchos/ | tail -1 | grep -q '1050 subidos, 0 sin cambios' || fail "ve sincroniza no subió la carpeta"
+ve sincroniza muchos chuspa://prod-chuspa-name/muchos/ | tail -1 | grep -q '0 subidos, 1050 sin cambios' || fail "ve sincroniza repitió subidas"
+ve sincroniza chuspa://prod-chuspa-name/muchos ve-muchos | tail -1 | grep -q '1050 bajados' || fail "ve sincroniza no bajó la carpeta"
+diff -r muchos ve-muchos
+ve borra chuspa://prod-chuspa-name/test/salsa.txt
+if ve borra chuspa://prod-chuspa-name 2>ve-error.txt; then fail "ve borró una chuspa con objetos"; fi
+grep -q "no está vacía" ve-error.txt || fail "ve no explicó por qué no borró la chuspa"
+ve borra chuspa://prod-chuspa-name -r | grep -q '^chuspa borrada' || fail "ve borra -r no borró la chuspa"
+if VE_ENDPOINT="$ENDPOINT" AWS_SECRET_ACCESS_KEY=otra "$WORK/ve" mira 2>ve-error.txt; then fail "ve aceptó credenciales malas"; fi
+grep -q "rechazó las credenciales" ve-error.txt || fail "ve no explicó el rechazo de credenciales"
 
 step "keys hostiles y con caracteres raros"
 s3 s3api put-object --bucket "$BUCKET" --key '../../etc/passwd' --body salsa.txt >/dev/null

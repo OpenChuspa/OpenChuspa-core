@@ -70,6 +70,35 @@ docker compose up -d --build
 
 La imagen es distroless: sin shell, sin root, con el sistema de archivos de solo lectura y sin capabilities. El puerto se publica solo en loopback.
 
+## CLI `ve`
+
+`ve` traduce los comandos caleños a S3. Sirve con el motor y con cualquier servicio compatible con S3.
+
+```bash
+go build -o ve ./cmd/ve
+export AWS_ACCESS_KEY_ID=mi-llave AWS_SECRET_ACCESS_KEY="$SECRETO"
+# VE_ENDPOINT es http://localhost:9000 por defecto; VE_REGION, cali-san-antonio-1.
+
+./ve crea chuspa://feria-de-cali
+./ve subi ./cancion.mp3 a chuspa://feria-de-cali/music/
+./ve mira chuspa://feria-de-cali/music/
+./ve baja chuspa://feria-de-cali/music/cancion.mp3 .
+./ve sincroniza ./mis-fotos chuspa://feria-de-cali/fotos/
+./ve borra chuspa://feria-de-cali/music/cancion.mp3
+./ve borra chuspa://feria-de-cali -r      # la vacía y la borra
+```
+
+| `ve` | AWS CLI |
+|---|---|
+| `ve mira chuspa://[chuspa/prefijo] [-r]` | `aws s3 ls [--recursive]` |
+| `ve crea chuspa://chuspa` | `aws s3 mb` |
+| `ve subi <archivo>... [a] chuspa://chuspa/key` | `aws s3 cp` (multipart desde 64 MiB) |
+| `ve baja chuspa://chuspa/key [destino]` | `aws s3 cp` |
+| `ve borra chuspa://chuspa/key`, `-r` para un prefijo o la chuspa entera | `aws s3 rm`, `aws s3 rb --force` |
+| `ve sincroniza <carpeta> chuspa://...` y al revés | `aws s3 sync`, sin borrar en el destino |
+
+`s3://` también se acepta como dirección. Al bajar o sincronizar, las keys que se saldrían de la carpeta de destino (como `../../etc/passwd`) se saltan con un aviso. `ve ayuda` muestra todas las opciones.
+
 ## Configuración
 
 | Variable | Por defecto | Descripción |
@@ -114,6 +143,7 @@ export CHUSPA_DATA_DIR=./data
 
 ```
 cmd/chuspa/              binario: serve, healthcheck, inspect, export, version
+cmd/ve/                  CLI caleña: mira, crea, subi, baja, borra, sincroniza
 internal/config/         variables de entorno y validación de arranque
 internal/s3api/          enrutado, handlers, XML y catálogo de errores
 internal/auth/           verificación SigV4
@@ -126,7 +156,7 @@ test/compat/             pruebas con clientes reales
 test/s3tests/            configuración y lista de pruebas de ceph/s3-tests
 ```
 
-Dependencias en tiempo de ejecución: la biblioteca estándar y `go.etcd.io/bbolt` (MIT). `aws-sdk-go-v2` (Apache-2.0) se usa solo en pruebas.
+Dependencias en tiempo de ejecución del motor: la biblioteca estándar y `go.etcd.io/bbolt` (MIT). La CLI `ve` usa además `aws-sdk-go-v2` (Apache-2.0), que el motor solo usa en pruebas.
 
 ## Pruebas
 
@@ -162,6 +192,5 @@ La suite de compatibilidad genera credenciales aleatorias en cada ejecución y a
 
 ## Pendiente
 
-- Primer release `0.1.0`: el workflow de release (imagen multi-arquitectura firmada con cosign, SBOM, provenance y binarios con sumas firmadas) está escrito y nunca se ha ejecutado.
 - Reconstruir el índice a partir de los blobs: hoy la recuperación es la copia diaria `meta.db.bak`.
 - Lo que sigue en el roadmap del diseño: URLs prefirmadas, host virtual, TLS nativo, varios usuarios y políticas, tags, versionado, cifrado en reposo y replicación.
