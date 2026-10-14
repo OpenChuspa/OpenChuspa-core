@@ -191,7 +191,7 @@ type copyPartResult struct {
 	ETag         string
 }
 
-// tagging siempre va vacío: los tags llegan en la fase 2.
+// tagging siempre va vacío: el motor no guarda tags.
 type tagging struct {
 	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ Tagging"`
 	TagSet  struct{} `xml:"TagSet"`

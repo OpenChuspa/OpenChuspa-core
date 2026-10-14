@@ -63,7 +63,7 @@ type request struct {
 	key     string
 }
 
-// Subrecursos de S3 que el motor todavía no implementa.
+// Subrecursos de S3 que el motor no implementa.
 var unsupportedSubresources = []string{
 	"accelerate", "acl", "analytics", "attributes", "cors", "encryption",
 	"intelligent-tiering", "inventory", "legal-hold", "lifecycle", "logging", "metrics",
