@@ -1,8 +1,12 @@
 # Changelog
 
-Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [SemVer](https://semver.org/lang/es/). Mientras el proyecto esté en `0.x`, una versión menor puede romper compatibilidad y lo dirá aquí.
+Los cambios notables del proyecto. El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones, [SemVer](https://semver.org/lang/es/). Mientras el proyecto esté en `0.x`, una versión menor puede romper compatibilidad y lo dirá aquí. El formato de los datos en disco nunca se rompe sin migración automática.
 
 ## [Sin publicar]
+
+## [0.3.0] - 2026-10-13
+
+Primera versión que cierra el MVP: un nodo, durable, verificable y endurecido.
 
 ### Añadido
 
