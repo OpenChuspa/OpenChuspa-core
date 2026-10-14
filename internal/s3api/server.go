@@ -35,7 +35,9 @@ type Server struct {
 	// la configuración solo permite en loopback.
 	Verifier *auth.Verifier
 	// Limiter, si no es nil, bloquea a quien acumule autenticaciones fallidas.
-	Limiter       *AuthLimiter
+	Limiter *AuthLimiter
+	// OnAuthBlock, si no es nil, se llama cada vez que se bloquea una IP.
+	OnAuthBlock   func()
 	Region        string
 	Log           *slog.Logger
 	MaxObjectSize int64
@@ -91,6 +93,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.Limiter.Fail(r.RemoteAddr) {
 				s.Log.Warn("demasiadas autenticaciones fallidas: se bloquea la dirección", "remote", r.RemoteAddr,
 					"bloqueo", s.Limiter.Block.String())
+				if s.OnAuthBlock != nil {
+					s.OnAuthBlock()
+				}
 			}
 			WriteError(w, r, authError(err))
 			return

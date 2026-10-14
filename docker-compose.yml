@@ -3,14 +3,12 @@
 #   mkdir -p secrets && openssl rand -hex 24 > secrets/chuspa_root_password
 #   chmod 600 secrets/chuspa_root_password
 #   echo "CHUSPA_ROOT_USER=mi-llave" > .env
-#   docker compose up -d --build
+#   docker compose up -d
 #
-# Todavía no hay imagen publicada: se construye desde este repositorio. Cuando
-# exista el primer release, reemplace "build" por la imagen con su versión
-# exacta (nunca latest).
+# Siempre la versión exacta de la imagen, nunca latest.
 services:
   chuspa:
-    build: .
+    image: docker.io/openchuspa/chuspa:0.3.0
     ports:
       # Solo en loopback: exponerlo es una decisión de quien despliega, y
       # exige un proxy con TLS delante.

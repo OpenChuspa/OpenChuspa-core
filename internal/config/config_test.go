@@ -32,6 +32,8 @@ func TestLoad(t *testing.T) {
 		{"dirección inválida", map[string]string{"CHUSPA_ADDR": "9000"}, "CHUSPA_ADDR inválida"},
 		{"expiración inválida", map[string]string{"CHUSPA_MULTIPART_EXPIRY": "una semana"}, "CHUSPA_MULTIPART_EXPIRY inválida"},
 		{"verificación inválida", map[string]string{"CHUSPA_SCRUB_INTERVAL": "-1h"}, "CHUSPA_SCRUB_INTERVAL inválida"},
+		{"métricas inválidas", map[string]string{"CHUSPA_METRICS_ADDR": "9100"}, "CHUSPA_METRICS_ADDR inválida"},
+		{"métricas en el puerto de la API", map[string]string{"CHUSPA_METRICS_ADDR": "127.0.0.1:9000"}, "distinta de CHUSPA_ADDR"},
 		{"bloqueo inválido", map[string]string{"CHUSPA_AUTH_MAX_FAILURES": "-1"}, "CHUSPA_AUTH_MAX_FAILURES inválido"},
 		{"espacio libre inválido", map[string]string{"CHUSPA_MIN_FREE_MB": "1GB"}, "CHUSPA_MIN_FREE_MB inválido"},
 		{"rotación válida", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_PREVIOUS": "fedcba9876543210fedcba9876543210"}, ""},

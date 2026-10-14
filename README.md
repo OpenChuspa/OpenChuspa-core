@@ -6,7 +6,7 @@ El diseño completo está en [`MVP-ENGINE-v2.md`](./MVP-ENGINE-v2.md). Las decis
 
 ## Estado
 
-Proyecto en construcción, versión `0.x`: todavía no hay releases ni imagen publicada, y no ha pasado una auditoría de seguridad externa. No lo use para datos que no pueda perder.
+Versión `0.3.0`, la primera que cierra el MVP: un nodo, con datos versionados y reconstruibles, verificación de contenido, TLS nativo y probado en cada cambio contra los SDK de AWS, `ceph/s3-tests` y una prueba de resistencia con `kill -9`. La imagen está en Docker Hub (`openchuspa/chuspa`) y en `ghcr.io/openchuspa/chuspa`, firmada con cosign. Todavía no ha pasado una auditoría de seguridad externa: mantenga copias de lo que no pueda perder, como con cualquier almacenamiento de un solo nodo.
 
 Lo que hay funciona de verdad contra clientes reales. Esta tabla solo lista lo que pasa en CI, en [`test/compat/run.sh`](./test/compat/run.sh) o en las pruebas unitarias.
 
@@ -59,14 +59,14 @@ El direccionamiento es por ruta (`/chuspa/key`). El estilo de host virtual (`chu
 
 ### Con Docker
 
-Todavía no hay imagen publicada; se construye desde el repositorio:
-
 ```bash
 mkdir -p secrets && openssl rand -hex 24 > secrets/chuspa_root_password
 chmod 600 secrets/chuspa_root_password
 echo "CHUSPA_ROOT_USER=mi-llave" > .env
-docker compose up -d --build
+docker compose up -d
 ```
+
+El `docker-compose.yml` usa la imagen publicada con su versión exacta. Para construirla desde el código: `docker build -t chuspa:local .`.
 
 La imagen es distroless: sin shell, sin root, con el sistema de archivos de solo lectura y sin capabilities. El puerto se publica solo en loopback.
 
@@ -110,6 +110,7 @@ export AWS_ACCESS_KEY_ID=mi-llave AWS_SECRET_ACCESS_KEY="$SECRETO"
 | `CHUSPA_ROOT_PASSWORD_FILE` | *(vacío)* | Ruta a un archivo con el secreto; alternativa a la anterior. |
 | `CHUSPA_ROOT_PASSWORD_PREVIOUS` (o `_FILE`) | *(vacío)* | Secreto anterior, aceptado además del actual mientras se rota. |
 | `CHUSPA_TLS_CERT_FILE` / `CHUSPA_TLS_KEY_FILE` | *(vacío)* | Certificado y llave PEM para TLS nativo (1.2 o superior). Se releen al cambiar en disco. |
+| `CHUSPA_METRICS_ADDR` | *(vacío)* | Dirección para las métricas de Prometheus en `/metrics`, aparte de la API (por ejemplo `127.0.0.1:9100`). Vacía, no se publican. |
 | `CHUSPA_AUTH_MAX_FAILURES` | `20` | Autenticaciones fallidas por minuto que bloquean una IP durante 5 minutos (`503 SlowDown`). `0` lo desactiva. |
 | `CHUSPA_REGION` | `cali-san-antonio-1` | Región que reporta el servidor y que exige en la firma. |
 | `CHUSPA_ALLOW_ANONYMOUS` | `false` | Sin autenticación. Solo se acepta escuchando en loopback. |
@@ -123,6 +124,24 @@ El servidor **no arranca** sin credenciales, con un secreto corto, en modo anón
 Fuera de loopback, el servidor necesita TLS: el propio (`CHUSPA_TLS_CERT_FILE` y `CHUSPA_TLS_KEY_FILE`) o un proxy con TLS delante. Sin ninguno de los dos lo avisa en el log. Detrás de un proxy, el bloqueo por fuerza bruta ve la IP del proxy: un ataque bloquea a todos durante 5 minutos, lo que se prefiere a dejar probar llaves sin límite.
 
 **Rotar el secreto sin cortar el servicio:** se pone el nuevo en `CHUSPA_ROOT_PASSWORD`, el actual en `CHUSPA_ROOT_PASSWORD_PREVIOUS` y se reinicia; se cambian los clientes; se quita `CHUSPA_ROOT_PASSWORD_PREVIOUS` y se reinicia otra vez.
+
+## Monitoreo
+
+Con `CHUSPA_METRICS_ADDR` el motor publica en `/metrics`, en formato de Prometheus:
+
+| Métrica | Para qué |
+|---|---|
+| `chuspa_requests_total{method,code}` | Tráfico y errores; alertar sobre la tasa de `5xx`. |
+| `chuspa_request_duration_seconds` | Latencia por método (histograma). |
+| `chuspa_received_bytes_total`, `chuspa_sent_bytes_total` | Volumen. |
+| `chuspa_disk_free_bytes` | Alertar antes de llegar a `CHUSPA_MIN_FREE_MB`. |
+| `chuspa_scrub_damaged_objects` | Debe ser 0; cualquier otro valor es un disco dañando datos. |
+| `chuspa_last_scrub_timestamp_seconds`, `chuspa_last_backup_timestamp_seconds` | Que la verificación y la copia del índice sigan corriendo. |
+| `chuspa_maintenance_errors_total` | Fallos del mantenimiento. |
+| `chuspa_auth_blocks_total` | IPs bloqueadas por fuerza bruta. |
+| `chuspa_build_info{version}` | Versión desplegada. |
+
+Las métricas no llevan keys, nombres de chuspa ni secretos.
 
 ## Cómo guarda los datos
 
@@ -196,11 +215,17 @@ test/s3tests/run.sh
 go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+# Resistencia: clientes concurrentes mientras el motor se mata con kill -9;
+# todo lo confirmado debe leerse idéntico y chuspa verify no debe ver daños
+go run ./test/soak -duration 2m
+
 # Fuzzing de los analizadores de entrada no confiable
 go test ./internal/chunked -run '^$' -fuzz '^FuzzReader$' -fuzztime 1m
 go test ./internal/auth -run '^$' -fuzz '^FuzzParseAuthorization$' -fuzztime 1m
 go test ./internal/s3api -run '^$' -fuzz '^FuzzParseRange$' -fuzztime 1m
 ```
+
+Cada noche, el workflow `nightly` corre 15 minutos de fuzzing por analizador y 15 minutos de la prueba de resistencia con 16 clientes.
 
 La suite de compatibilidad genera credenciales aleatorias en cada ejecución y aísla al AWS CLI de la configuración y los perfiles de quien la corre.
 

@@ -2,7 +2,7 @@
 
 Qué funciona hoy contra clientes reales y cuánto de la suite de conformidad pasa. Todo lo que aparece aquí se ejecuta en CI en cada pull request; lo que no aparece no se promete.
 
-Última actualización: 2026-10-13.
+Última actualización: 2026-10-13 (v0.3.0).
 
 ## Clientes
 
@@ -71,7 +71,7 @@ Diferencias deliberadas con lo que espera la suite:
 - Los nombres de chuspa con puntos se rechazan mientras no exista el estilo de host virtual.
 - Completar una subida con el mismo número de parte repetido responde `InvalidPartOrder`.
 
-La meta de conformidad para dar por cerrado el MVP la fijan los mantenedores (sección 14 del diseño).
+**Meta del MVP (v0.3.0):** cero regresiones sobre las 222 y ninguna falla atribuible a una operación que el motor declara soportar; las que fallan corresponden a las funciones de la tabla anterior, fuera del alcance del MVP. Medido el 2026-10-13 con `run.sh --all`: 222 de 744, igual que en v0.2.0. Cada fase del roadmap sube la meta con las pruebas de lo que implementa.
 
 Para recalcular la lista después de implementar algo:
 

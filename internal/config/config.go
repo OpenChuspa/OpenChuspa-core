@@ -76,6 +76,9 @@ type Config struct {
 	// AuthMaxFailures es cuántas autenticaciones fallidas por minuto bloquean
 	// una IP; en cero no se bloquea.
 	AuthMaxFailures int
+	// MetricsAddr, si no está vacío, es donde se publican las métricas de
+	// Prometheus, en un puerto aparte de la API.
+	MetricsAddr string
 }
 
 // Loopback indica si el servidor escucha solo en la interfaz local.
@@ -124,6 +127,14 @@ func Load(getenv func(string) string) (Config, error) {
 
 	if _, _, err := net.SplitHostPort(c.Addr); err != nil {
 		return Config{}, fmt.Errorf("CHUSPA_ADDR inválida (%q): se espera host:puerto", c.Addr)
+	}
+	if c.MetricsAddr = getenv("CHUSPA_METRICS_ADDR"); c.MetricsAddr != "" {
+		if _, _, err := net.SplitHostPort(c.MetricsAddr); err != nil {
+			return Config{}, fmt.Errorf("CHUSPA_METRICS_ADDR inválida (%q): se espera host:puerto, como 127.0.0.1:9100", c.MetricsAddr)
+		}
+		if c.MetricsAddr == c.Addr {
+			return Config{}, errors.New("CHUSPA_METRICS_ADDR debe ser distinta de CHUSPA_ADDR")
+		}
 	}
 	if !regionRe.MatchString(c.Region) {
 		return Config{}, fmt.Errorf("CHUSPA_REGION inválida (%q): solo minúsculas, dígitos y guiones", c.Region)

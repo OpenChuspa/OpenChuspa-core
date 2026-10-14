@@ -297,7 +297,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 NEW_SECRET="$(openssl rand -hex 24)"
 CHUSPA_ADDR="127.0.0.1:$PORT" CHUSPA_DATA_DIR="$WORK/data" CHUSPA_ROOT_USER=$ACCESS_KEY \
 CHUSPA_ROOT_PASSWORD=$NEW_SECRET CHUSPA_ROOT_PASSWORD_PREVIOUS=$SECRET_KEY \
-CHUSPA_TLS_CERT_FILE="$WORK/tls.crt" CHUSPA_TLS_KEY_FILE="$WORK/tls.key" \
+CHUSPA_TLS_CERT_FILE="$WORK/tls.crt" CHUSPA_TLS_KEY_FILE="$WORK/tls.key" CHUSPA_METRICS_ADDR="127.0.0.1:$((PORT + 1))" \
   "$WORK/chuspa" serve >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do
@@ -314,6 +314,11 @@ for _ in $(seq 1 20); do
 done
 expect_error SlowDown env AWS_SECRET_ACCESS_KEY="$NEW_SECRET" aws --endpoint-url "https://127.0.0.1:$PORT" --ca-bundle "$WORK/tls.crt" s3api list-buckets
 grep -q "demasiadas autenticaciones fallidas" "$WORK/server.log" || fail "el bloqueo no quedó en el log"
+curl -s "http://127.0.0.1:$((PORT + 1))/metrics" >metricas.txt
+grep -q '^chuspa_auth_blocks_total 1$' metricas.txt || fail "las métricas no registran el bloqueo"
+grep -q '^chuspa_requests_total{method="GET",code="403"} ' metricas.txt || fail "las métricas no cuentan las peticiones"
+grep -q '^chuspa_disk_free_bytes [1-9]' metricas.txt || fail "las métricas no reportan el espacio libre"
+if grep -qe "$NEW_SECRET" -e "$SECRET_KEY" metricas.txt; then fail "las métricas exponen un secreto"; fi
 stop_server TERM
 
 step "sin secretos en los logs"

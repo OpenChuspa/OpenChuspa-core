@@ -48,13 +48,16 @@ func (r *recorder) Write(p []byte) (int, error) {
 
 func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
+// Observer recibe cada petición atendida, para las métricas.
+type Observer func(method string, status int, d time.Duration, in, out int64)
+
 // Wrap envuelve next con el identificador de petición, el log de acceso y la
 // recuperación de pánicos. onPanic escribe la respuesta de error si todavía
-// no se ha enviado nada.
+// no se ha enviado nada; observe, si no es nil, recibe cada petición.
 //
 // El log registra método, ruta, estado, bytes y duración. Nunca registra
 // headers ni la query: ahí viajan Authorization y las firmas.
-func Wrap(next http.Handler, log *slog.Logger, onPanic func(http.ResponseWriter, *http.Request)) http.Handler {
+func Wrap(next http.Handler, log *slog.Logger, onPanic func(http.ResponseWriter, *http.Request), observe Observer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		id := newRequestID()
@@ -72,9 +75,13 @@ func Wrap(next http.Handler, log *slog.Logger, onPanic func(http.ResponseWriter,
 					onPanic(rec, r)
 				}
 			}
+			elapsed := time.Since(start)
 			log.Info("petición", "request_id", id, "method", r.Method, "path", r.URL.Path,
-				"status", rec.status, "bytes", rec.bytes, "duration_ms", time.Since(start).Milliseconds(),
+				"status", rec.status, "bytes", rec.bytes, "duration_ms", elapsed.Milliseconds(),
 				"remote", r.RemoteAddr)
+			if observe != nil {
+				observe(r.Method, rec.status, elapsed, r.ContentLength, rec.bytes)
+			}
 		}()
 		next.ServeHTTP(rec, r)
 	})
