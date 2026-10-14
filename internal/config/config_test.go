@@ -32,7 +32,13 @@ func TestLoad(t *testing.T) {
 		{"dirección inválida", map[string]string{"CHUSPA_ADDR": "9000"}, "CHUSPA_ADDR inválida"},
 		{"expiración inválida", map[string]string{"CHUSPA_MULTIPART_EXPIRY": "una semana"}, "CHUSPA_MULTIPART_EXPIRY inválida"},
 		{"verificación inválida", map[string]string{"CHUSPA_SCRUB_INTERVAL": "-1h"}, "CHUSPA_SCRUB_INTERVAL inválida"},
+		{"bloqueo inválido", map[string]string{"CHUSPA_AUTH_MAX_FAILURES": "-1"}, "CHUSPA_AUTH_MAX_FAILURES inválido"},
 		{"espacio libre inválido", map[string]string{"CHUSPA_MIN_FREE_MB": "1GB"}, "CHUSPA_MIN_FREE_MB inválido"},
+		{"rotación válida", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_PREVIOUS": "fedcba9876543210fedcba9876543210"}, ""},
+		{"secreto anterior corto", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_PREVIOUS": "corto"}, "PREVIOUS es muy corto"},
+		{"secreto anterior igual", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_PREVIOUS": goodSecret}, "igual al secreto actual"},
+		{"TLS a medias", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_TLS_CERT_FILE": "/x"}, "juntas"},
+		{"certificado ilegible", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_TLS_CERT_FILE": "/no/existe", "CHUSPA_TLS_KEY_FILE": "/no/existe"}, "certificado TLS"},
 		{"dos fuentes del secreto", map[string]string{"CHUSPA_ROOT_USER": "parcero", "CHUSPA_ROOT_PASSWORD": goodSecret, "CHUSPA_ROOT_PASSWORD_FILE": "/x"}, "no ambas"},
 	}
 	for _, tt := range tests {

@@ -139,3 +139,27 @@ func FuzzParseAuthorization(f *testing.F) {
 		}
 	})
 }
+
+func TestRotacionDelSecreto(t *testing.T) {
+	const nuevo = "fedcba9876543210fedcba9876543210"
+	v := verifier()
+	v.SecretKey, v.PreviousSecretKey = nuevo, testSecret
+
+	for _, secret := range []string{nuevo, testSecret} {
+		id, err := v.Verify(signed(t, "GET", "/", secret, emptyHash, nil))
+		if err != nil {
+			t.Fatalf("durante la rotación se rechazó un secreto válido: %v", err)
+		}
+		// La llave de los chunks debe ser la del secreto que firmó.
+		if want := DeriveKey(secret, "20261013", testRegion, "s3"); string(id.Signing.Key) != string(want) {
+			t.Fatal("la llave de firma de los chunks no corresponde al secreto usado")
+		}
+	}
+	if _, err := v.Verify(signed(t, "GET", "/", "0000000000000000000000000000000000", emptyHash, nil)); err == nil {
+		t.Fatal("se aceptó un secreto que no es ni el nuevo ni el anterior")
+	}
+	v.PreviousSecretKey = ""
+	if _, err := v.Verify(signed(t, "GET", "/", testSecret, emptyHash, nil)); err == nil {
+		t.Fatal("terminada la rotación se siguió aceptando el secreto anterior")
+	}
+}

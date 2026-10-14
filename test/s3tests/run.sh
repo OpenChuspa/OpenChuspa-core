@@ -56,8 +56,9 @@ identity() {
 } >"$WORK/s3tests.conf"
 
 # La suite firma con us-east-1.
+# Las pruebas de firmas inválidas dispararían el bloqueo por fuerza bruta.
 CHUSPA_ADDR="127.0.0.1:$PORT" CHUSPA_DATA_DIR="$WORK/data" CHUSPA_REGION=us-east-1 \
-CHUSPA_ROOT_USER=s3tests CHUSPA_ROOT_PASSWORD=$SECRET_KEY CHUSPA_LOG_FORMAT=text \
+CHUSPA_ROOT_USER=s3tests CHUSPA_ROOT_PASSWORD=$SECRET_KEY CHUSPA_LOG_FORMAT=text CHUSPA_AUTH_MAX_FAILURES=0 \
   "$WORK/chuspa" serve >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do

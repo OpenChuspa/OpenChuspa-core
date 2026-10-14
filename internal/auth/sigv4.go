@@ -48,8 +48,11 @@ var (
 type Verifier struct {
 	AccessKey string
 	SecretKey string
-	Region    string
-	Now       func() time.Time // reloj inyectable para pruebas; por defecto time.Now
+	// PreviousSecretKey, si no está vacío, también se acepta: permite rotar
+	// el secreto sin cortar a los clientes que aún usan el anterior.
+	PreviousSecretKey string
+	Region            string
+	Now               func() time.Time // reloj inyectable para pruebas; por defecto time.Now
 }
 
 // Identity es el resultado de una verificación exitosa.
@@ -165,8 +168,14 @@ func (v *Verifier) Verify(r *http.Request) (*Identity, error) {
 	// dependa del motivo del rechazo.
 	key := DeriveKey(v.SecretKey, a.Date, a.Region, a.Service)
 	want := hex.EncodeToString(hmacSHA256(key, stringToSign))
-
 	valid := subtle.ConstantTimeCompare([]byte(want), []byte(a.Signature))
+	if v.PreviousSecretKey != "" {
+		prevKey := DeriveKey(v.PreviousSecretKey, a.Date, a.Region, a.Service)
+		prevWant := hex.EncodeToString(hmacSHA256(prevKey, stringToSign))
+		if subtle.ConstantTimeCompare([]byte(prevWant), []byte(a.Signature)) == 1 {
+			valid, key = 1, prevKey
+		}
+	}
 	valid &= subtle.ConstantTimeCompare([]byte(a.AccessKey), []byte(v.AccessKey))
 	valid &= subtle.ConstantTimeCompare([]byte(a.Region), []byte(v.Region))
 	valid &= subtle.ConstantTimeCompare([]byte(a.Service), []byte(service))

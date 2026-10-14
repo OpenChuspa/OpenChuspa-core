@@ -33,7 +33,9 @@ type Server struct {
 	Backend storage.Backend
 	// Verifier verifica SigV4. Si es nil el servidor está en modo anónimo, que
 	// la configuración solo permite en loopback.
-	Verifier      *auth.Verifier
+	Verifier *auth.Verifier
+	// Limiter, si no es nil, bloquea a quien acumule autenticaciones fallidas.
+	Limiter       *AuthLimiter
 	Region        string
 	Log           *slog.Logger
 	MaxObjectSize int64
@@ -77,8 +79,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	req := &request{Request: r, w: w}
 	if s.Verifier != nil {
+		if s.Limiter != nil && s.Limiter.Blocked(r.RemoteAddr) {
+			WriteError(w, r, ErrSlowDown)
+			return
+		}
 		id, err := s.Verifier.Verify(r)
 		if err != nil {
+			// Un reloj desfasado o un mecanismo no soportado no son intentos
+			// de adivinar la llave.
+			if s.Limiter != nil && (errors.Is(err, auth.ErrSignature) || errors.Is(err, auth.ErrMissing)) &&
+				s.Limiter.Fail(r.RemoteAddr) {
+				s.Log.Warn("demasiadas autenticaciones fallidas: se bloquea la dirección", "remote", r.RemoteAddr,
+					"bloqueo", s.Limiter.Block.String())
+			}
 			WriteError(w, r, authError(err))
 			return
 		}
